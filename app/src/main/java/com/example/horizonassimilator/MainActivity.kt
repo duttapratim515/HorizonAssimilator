@@ -12,6 +12,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.example.horizonassimilator.ui.home.HomeScreen
+import com.example.horizonassimilator.ui.conversion.ConversionScreen
 import com.example.horizonassimilator.ui.settings.SettingsScreen
 import com.example.horizonassimilator.ui.theme.HorizonAssimilatorTheme
 
@@ -45,8 +46,7 @@ class MainActivity : ComponentActivity() {
                         }
 
                         composable("selectModel") {
-                            PlaceholderScreen(
-                                title = "Select Model",
+                            ConversionScreen(
                                 onBackClick = {
                                     navController.popBackStack()
                                 }
