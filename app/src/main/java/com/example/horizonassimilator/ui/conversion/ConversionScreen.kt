@@ -35,9 +35,13 @@ import com.example.horizonassimilator.conversion.DownloadProgress
 import com.example.horizonassimilator.conversion.ConversionProgress
 import com.example.horizonassimilator.conversion.ConversionRequest
 import com.example.horizonassimilator.conversion.ConversionState
+import com.example.horizonassimilator.conversion.ConversionLimits
 import com.example.horizonassimilator.conversion.ModelDownloader
+import com.example.horizonassimilator.conversion.ModelFile
 import com.example.horizonassimilator.conversion.SafetensorsToGgufConverter
 import com.example.horizonassimilator.conversion.SelectedModel
+import com.example.horizonassimilator.conversion.UrlValidation
+import com.example.horizonassimilator.conversion.toSizeLabel
 import kotlinx.coroutines.launch
 
 @Composable
@@ -56,14 +60,24 @@ fun ConversionScreen(
     var state by remember { mutableStateOf<ConversionState>(ConversionState.Idle) }
     var downloadUrl by remember { mutableStateOf("") }
     var downloadState by remember { mutableStateOf<ModelDownloadState>(ModelDownloadState.Idle) }
+    val urlValidation = remember(downloadUrl, downloader) {
+        downloader.validateSafetensorsUrl(downloadUrl)
+    }
 
     val modelPicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri != null) {
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            val files = uris.map { uri ->
+                ModelFile(
+                    uri = uri,
+                    displayName = context.displayNameFor(uri),
+                    sizeBytes = context.sizeBytesFor(uri)
+                )
+            }
             val model = SelectedModel(
-                uri = uri,
-                displayName = context.displayNameFor(uri)
+                displayName = files.bundleDisplayName(),
+                files = files
             )
             state = ConversionState.Ready(input = model)
         }
@@ -119,13 +133,19 @@ fun ConversionScreen(
                     onClick = { modelPicker.launch(arrayOf("*/*")) },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Select safetensors")
+                    Text("Select model files")
                 }
+
+                ModelBundleSummary(state = state)
 
                 UrlDownloadPanel(
                     url = downloadUrl,
+                    validation = urlValidation,
                     state = downloadState,
-                    onUrlChange = { downloadUrl = it },
+                    onUrlChange = {
+                        downloadUrl = it
+                        downloadState = ModelDownloadState.Idle
+                    },
                     onDownloadClick = {
                         scope.launch {
                             runModelDownload(
@@ -145,6 +165,8 @@ fun ConversionScreen(
                         val ready = state as? ConversionState.Ready
                         val fileName = ready?.input?.displayName
                             ?.replace(".safetensors", ".gguf", ignoreCase = true)
+                            ?.replace(".json", ".gguf", ignoreCase = true)
+                            ?.replace(" files", ".gguf", ignoreCase = true)
                             ?: "model.gguf"
                         outputPicker.launch(fileName)
                     },
@@ -161,12 +183,76 @@ fun ConversionScreen(
 }
 
 @Composable
+private fun ModelBundleSummary(
+    state: ConversionState
+) {
+    val model = when (state) {
+        is ConversionState.Ready -> state.input
+        is ConversionState.Running -> state.input
+        is ConversionState.Complete -> state.input
+        is ConversionState.Failed -> state.input
+        ConversionState.Idle -> null
+    } ?: return
+
+    val fileNames = model.files.map { it.displayName }
+    val safetensorsCount = model.safetensorsFiles.size
+    val safetensorsBytes = model.safetensorsFiles.mapNotNull { it.sizeBytes }.sum()
+    val hasUnknownSafetensorsSize = model.safetensorsFiles.any { it.sizeBytes == null }
+    val hasConfig = fileNames.any { it.equals("config.json", ignoreCase = true) }
+    val hasTokenizer = fileNames.any { it.equals("tokenizer.json", ignoreCase = true) || it.equals("tokenizer.model", ignoreCase = true) }
+    val hasIndex = fileNames.any { it.endsWith(".safetensors.index.json", ignoreCase = true) }
+
+    Column(
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text("${model.files.size} files selected")
+        Text("$safetensorsCount safetensors file${if (safetensorsCount == 1) "" else "s"}")
+        if (hasUnknownSafetensorsSize) {
+            Text("safetensors size: unknown")
+        } else {
+            Text("safetensors size: ${safetensorsBytes.toSizeLabel()}")
+        }
+        SafetensorsSizeWarning(totalBytes = safetensorsBytes, hasUnknownSize = hasUnknownSafetensorsSize)
+        Text("config.json: ${if (hasConfig) "present" else "missing"}")
+        Text("tokenizer: ${if (hasTokenizer) "present" else "missing"}")
+        if (safetensorsCount > 1) {
+            Text("safetensors index: ${if (hasIndex) "present" else "missing"}")
+        }
+    }
+}
+
+@Composable
+private fun SafetensorsSizeWarning(
+    totalBytes: Long,
+    hasUnknownSize: Boolean
+) {
+    val message = when {
+        hasUnknownSize -> "Size could not be read. The converter will verify it before running."
+        totalBytes > ConversionLimits.MAX_SOURCE_BYTES -> "Over 20 GB. This app will block conversion by default."
+        totalBytes >= ConversionLimits.LARGE_SOURCE_WARNING_BYTES -> "Very large for phone conversion. Expect long runtime, heat, and high storage use."
+        totalBytes >= ConversionLimits.RECOMMENDED_SOURCE_BYTES -> "Large for mobile. A smaller GGUF will be more practical for HorizonText."
+        else -> null
+    } ?: return
+
+    val color = if (totalBytes > ConversionLimits.MAX_SOURCE_BYTES) {
+        MaterialTheme.colorScheme.error
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+    Text(message, color = color)
+}
+
+@Composable
 private fun UrlDownloadPanel(
     url: String,
+    validation: UrlValidation,
     state: ModelDownloadState,
     onUrlChange: (String) -> Unit,
     onDownloadClick: () -> Unit
 ) {
+    val showValidation = url.isNotBlank() || validation is UrlValidation.Invalid
+
     Column(
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
@@ -174,13 +260,19 @@ private fun UrlDownloadPanel(
             value = url,
             onValueChange = onUrlChange,
             label = { Text("Safetensors blob URL") },
+            supportingText = {
+                if (showValidation) {
+                    Text(validation.message)
+                }
+            },
+            isError = url.isNotBlank() && validation is UrlValidation.Invalid,
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
 
         Button(
             onClick = onDownloadClick,
-            enabled = url.isNotBlank() && state !is ModelDownloadState.Running,
+            enabled = validation is UrlValidation.Valid && state !is ModelDownloadState.Running,
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("Download safetensors")
@@ -371,11 +463,21 @@ private suspend fun runConversion(
 
 private fun selectedModelLabel(state: ConversionState): String {
     return when (state) {
-        ConversionState.Idle -> "Choose a safetensors file to begin."
+        ConversionState.Idle -> "Choose model files to begin."
         is ConversionState.Ready -> state.input.displayName
         is ConversionState.Running -> state.input.displayName
         is ConversionState.Complete -> state.input.displayName
-        is ConversionState.Failed -> state.input?.displayName ?: "Choose a safetensors file to begin."
+        is ConversionState.Failed -> state.input?.displayName ?: "Choose model files to begin."
+    }
+}
+
+private fun List<ModelFile>.bundleDisplayName(): String {
+    val safetensors = filter { it.displayName.endsWith(".safetensors", ignoreCase = true) }
+    return when {
+        safetensors.size == 1 -> safetensors.first().displayName
+        safetensors.size > 1 -> "${safetensors.size} safetensors files"
+        size == 1 -> first().displayName
+        else -> "$size model files"
     }
 }
 
@@ -388,4 +490,15 @@ private fun Context.displayNameFor(uri: Uri): String {
             null
         }
     } ?: uri.lastPathSegment ?: "model.safetensors"
+}
+
+private fun Context.sizeBytesFor(uri: Uri): Long? {
+    return contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+        val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+        if (cursor.moveToFirst() && sizeIndex >= 0 && !cursor.isNull(sizeIndex)) {
+            cursor.getLong(sizeIndex).takeIf { it >= 0L }
+        } else {
+            null
+        }
+    }
 }

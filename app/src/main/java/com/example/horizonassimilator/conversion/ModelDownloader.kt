@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.net.HttpURLConnection
+import java.net.URI
 import java.net.URL
 
 data class DownloadProgress(
@@ -21,15 +22,11 @@ class ModelDownloader(
         onProgress: suspend (DownloadProgress) -> Unit
     ): Result<SelectedModel> = withContext(Dispatchers.IO) {
         runCatching {
-            val downloadUrl = sourceUrl.trim().toDirectDownloadUrl()
-            require(downloadUrl.startsWith("https://", ignoreCase = true)) {
-                "Enter a valid HTTPS model URL."
-            }
+            val validation = validateSafetensorsUrl(sourceUrl)
+            require(validation is UrlValidation.Valid) { validation.message }
 
+            val downloadUrl = validation.directDownloadUrl
             val fileName = downloadUrl.fileNameFromUrl()
-            require(fileName.endsWith(".safetensors", ignoreCase = true)) {
-                "The URL must point to a .safetensors file."
-            }
 
             onProgress(DownloadProgress(0f, "Connecting to model host"))
 
@@ -80,13 +77,48 @@ class ModelDownloader(
                 onProgress(DownloadProgress(1f, "Download complete"))
 
                 SelectedModel(
-                    uri = Uri.fromFile(targetFile),
-                    displayName = targetFile.name
+                    displayName = targetFile.name,
+                    files = listOf(
+                        ModelFile(
+                            uri = Uri.fromFile(targetFile),
+                            displayName = targetFile.name,
+                            sizeBytes = targetFile.length()
+                        )
+                    )
                 )
             } finally {
                 connection.disconnect()
             }
         }
+    }
+
+    fun validateSafetensorsUrl(sourceUrl: String): UrlValidation {
+        val trimmed = sourceUrl.trim()
+        if (trimmed.isBlank()) {
+            return UrlValidation.Invalid("Enter a Hugging Face safetensors URL.")
+        }
+
+        val uri = runCatching { URI(trimmed) }.getOrNull()
+            ?: return UrlValidation.Invalid("Enter a valid URL.")
+
+        if (!uri.scheme.equals("https", ignoreCase = true)) {
+            return UrlValidation.Invalid("Use an HTTPS Hugging Face URL.")
+        }
+
+        if (!uri.host.equals("huggingface.co", ignoreCase = true)) {
+            return UrlValidation.Invalid("Use a huggingface.co model file URL.")
+        }
+
+        val path = uri.path.orEmpty()
+        if (!path.contains("/blob/") && !path.contains("/resolve/")) {
+            return UrlValidation.Invalid("Use a Hugging Face file URL that contains /blob/ or /resolve/.")
+        }
+
+        if (!path.endsWith(".safetensors", ignoreCase = true)) {
+            return UrlValidation.Invalid("The URL must point to a .safetensors file.")
+        }
+
+        return UrlValidation.Valid(trimmed.toDirectDownloadUrl())
     }
 
     private fun String.toDirectDownloadUrl(): String {
@@ -101,4 +133,18 @@ class ModelDownloader(
     private fun Long.toMegabytesLabel(): String {
         return String.format("%.1f MB", this / 1_048_576f)
     }
+}
+
+sealed interface UrlValidation {
+    val message: String
+
+    data class Valid(
+        val directDownloadUrl: String
+    ) : UrlValidation {
+        override val message: String = "URL looks good."
+    }
+
+    data class Invalid(
+        override val message: String
+    ) : UrlValidation
 }
