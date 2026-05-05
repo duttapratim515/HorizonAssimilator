@@ -55,10 +55,55 @@ sealed interface ConversionState {
 
 data class ConversionRequest(
     val input: SelectedModel,
-    val output: Uri
+    val output: Uri,
+    val quantization: GgufQuantization = GgufQuantization.F16
 )
 
 data class ConversionProgress(
     val progress: Float?,
     val message: String
 )
+
+enum class GgufQuantization(
+    val label: String,
+    val description: String,
+    val estimatedOutputRatio: Double,
+    val nativeWriterEnabled: Boolean = false
+) {
+    F16(
+        label = "F16",
+        description = "Current native test mode. Highest fidelity, largest GGUF output.",
+        estimatedOutputRatio = 1.0,
+        nativeWriterEnabled = true
+    ),
+    Q8_0(
+        label = "Q8_0",
+        description = "Temporarily disabled until F16 conversion is stable.",
+        estimatedOutputRatio = 0.55
+    ),
+    Q6_K(
+        label = "Q6_K",
+        description = "Not bundled in the native writer yet.",
+        estimatedOutputRatio = 0.42
+    ),
+    Q5_K_M(
+        label = "Q5_K_M",
+        description = "Not bundled in the native writer yet.",
+        estimatedOutputRatio = 0.35
+    ),
+    Q4_K_M(
+        label = "Q4_K_M",
+        description = "Not bundled in the native writer yet.",
+        estimatedOutputRatio = 0.29
+    ),
+    Q4_K_S(
+        label = "Q4_K_S",
+        description = "Not bundled in the native writer yet.",
+        estimatedOutputRatio = 0.27
+    ),
+    Q3_K_M(
+        label = "Q3_K_M",
+        description = "Not bundled in the native writer yet.",
+        estimatedOutputRatio = 0.22
+    )
+}

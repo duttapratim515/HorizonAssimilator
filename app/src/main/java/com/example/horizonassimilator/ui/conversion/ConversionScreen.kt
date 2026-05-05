@@ -7,6 +7,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -36,11 +37,14 @@ import com.example.horizonassimilator.conversion.ConversionProgress
 import com.example.horizonassimilator.conversion.ConversionRequest
 import com.example.horizonassimilator.conversion.ConversionState
 import com.example.horizonassimilator.conversion.ConversionLimits
+import com.example.horizonassimilator.conversion.DeviceCapabilityStatus
+import com.example.horizonassimilator.conversion.GgufQuantization
 import com.example.horizonassimilator.conversion.ModelDownloader
 import com.example.horizonassimilator.conversion.ModelFile
 import com.example.horizonassimilator.conversion.SafetensorsToGgufConverter
 import com.example.horizonassimilator.conversion.SelectedModel
 import com.example.horizonassimilator.conversion.UrlValidation
+import com.example.horizonassimilator.conversion.buildDeviceCapabilityPreflight
 import com.example.horizonassimilator.conversion.toSizeLabel
 import kotlinx.coroutines.launch
 
@@ -60,9 +64,19 @@ fun ConversionScreen(
     var state by remember { mutableStateOf<ConversionState>(ConversionState.Idle) }
     var downloadUrl by remember { mutableStateOf("") }
     var downloadState by remember { mutableStateOf<ModelDownloadState>(ModelDownloadState.Idle) }
+    var selectedQuantization by remember { mutableStateOf(GgufQuantization.F16) }
     val urlValidation = remember(downloadUrl, downloader) {
         downloader.validateSafetensorsUrl(downloadUrl)
     }
+    val readyModel = (state as? ConversionState.Ready)?.input
+    val readyPreflight = remember(context, readyModel, selectedQuantization) {
+        readyModel?.let { context.buildDeviceCapabilityPreflight(it, selectedQuantization) }
+    }
+    val canCreateGguf = readyPreflight?.let { preflight ->
+        preflight.status != DeviceCapabilityStatus.Unsupported &&
+            preflight.status != DeviceCapabilityStatus.TooLarge &&
+            preflight.checks.all { it.passed }
+    } == true
 
     val modelPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments()
@@ -93,7 +107,8 @@ fun ConversionScreen(
                     converter = converter,
                     request = ConversionRequest(
                         input = ready.input,
-                        output = uri
+                        output = uri,
+                        quantization = selectedQuantization
                     ),
                     onStateChange = { state = it }
                 )
@@ -138,6 +153,16 @@ fun ConversionScreen(
 
                 ModelBundleSummary(state = state)
 
+                QuantizationSelector(
+                    selected = selectedQuantization,
+                    onSelected = { selectedQuantization = it }
+                )
+
+                PreflightPanel(
+                    state = state,
+                    quantization = selectedQuantization
+                )
+
                 UrlDownloadPanel(
                     url = downloadUrl,
                     validation = urlValidation,
@@ -170,15 +195,122 @@ fun ConversionScreen(
                             ?: "model.gguf"
                         outputPicker.launch(fileName)
                     },
-                    enabled = state is ConversionState.Ready,
+                    enabled = canCreateGguf,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("Create GGUF")
+                }
+                if (state is ConversionState.Ready && !canCreateGguf) {
+                    Text(
+                        text = "Resolve the preflight checks before creating the GGUF.",
+                        color = MaterialTheme.colorScheme.error
+                    )
                 }
             }
         }
 
         ConversionStatusCard(state = state)
+    }
+}
+
+@Composable
+private fun QuantizationSelector(
+    selected: GgufQuantization,
+    onSelected: (GgufQuantization) -> Unit
+) {
+    Column(
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = "Quantization",
+            style = MaterialTheme.typography.titleMedium
+        )
+        Text(
+            text = selected.description,
+            style = MaterialTheme.typography.bodySmall
+        )
+        Text(
+            text = "F16 is locked for validation in this build.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.primary
+        )
+        GgufQuantization.entries.chunked(2).forEach { rowItems ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                rowItems.forEach { quantization ->
+                    val enabled = quantization.nativeWriterEnabled && quantization != selected
+                    OutlinedButton(
+                        onClick = { onSelected(quantization) },
+                        modifier = Modifier.weight(1f),
+                        enabled = enabled
+                    ) {
+                        Text(quantization.label)
+                    }
+                }
+                if (rowItems.size == 1) {
+                    Spacer(modifier = Modifier.weight(1f))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PreflightPanel(
+    state: ConversionState,
+    quantization: GgufQuantization
+) {
+    val context = LocalContext.current
+    val model = when (state) {
+        is ConversionState.Ready -> state.input
+        is ConversionState.Running -> state.input
+        is ConversionState.Complete -> state.input
+        is ConversionState.Failed -> state.input
+        ConversionState.Idle -> null
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = "Preflight Check",
+                style = MaterialTheme.typography.titleMedium
+            )
+
+            if (model == null) {
+                Text("Select model files to estimate device fit.")
+                return@Column
+            }
+
+            val preflight = remember(context, model, quantization) {
+                context.buildDeviceCapabilityPreflight(model, quantization)
+            }
+            val statusColor = when (preflight.status) {
+                DeviceCapabilityStatus.Good -> MaterialTheme.colorScheme.primary
+                DeviceCapabilityStatus.Heavy -> MaterialTheme.colorScheme.tertiary
+                DeviceCapabilityStatus.TooLarge,
+                DeviceCapabilityStatus.Unsupported -> MaterialTheme.colorScheme.error
+            }
+
+            Text(
+                text = "${preflight.status.label}: ${preflight.status.description}",
+                color = statusColor
+            )
+            Text("Quantization: ${quantization.label}")
+            Text("Estimated GGUF: ${preflight.estimatedOutputBytes?.toSizeLabel() ?: "Unknown"}")
+            Text("Estimated workspace: ${preflight.estimatedWorkspaceBytes?.toSizeLabel() ?: "Unknown"}")
+
+            preflight.checks.forEach { check ->
+                val prefix = if (check.passed) "OK" else "Check"
+                Text("$prefix ${check.label}: ${check.value}. ${check.detail}")
+            }
+        }
     }
 }
 

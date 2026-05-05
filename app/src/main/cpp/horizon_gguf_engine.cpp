@@ -1,5 +1,7 @@
 #include <jni.h>
 
+#include "horizon_gguf_converter.h"
+
 #include <string>
 
 static std::string g_last_error;
@@ -10,14 +12,17 @@ Java_com_example_horizonassimilator_conversion_NativeGgufEngine_nativeConvertToG
         JNIEnv *env,
         jobject,
         jstring model_directory_path,
-        jstring output_file_path) {
+        jstring output_file_path,
+        jstring quantization_value) {
     const char *model_directory = env->GetStringUTFChars(model_directory_path, nullptr);
     const char *output_file = env->GetStringUTFChars(output_file_path, nullptr);
+    const char *quantization = env->GetStringUTFChars(quantization_value, nullptr);
 
-    g_last_error = "Native GGUF engine is linked for arm64-v8a, but the safetensors-to-GGUF converter is not bundled yet. Model directory: ";
-    g_last_error += model_directory == nullptr ? "<unavailable>" : model_directory;
-    g_last_error += " Output: ";
-    g_last_error += output_file == nullptr ? "<unavailable>" : output_file;
+    HorizonConversionSummary result = inspect_hf_safetensors_model(
+            model_directory == nullptr ? "" : model_directory,
+            output_file == nullptr ? "" : output_file,
+            quantization == nullptr ? "" : quantization);
+    g_last_error = result.message;
 
     if (model_directory != nullptr) {
         env->ReleaseStringUTFChars(model_directory_path, model_directory);
@@ -25,8 +30,11 @@ Java_com_example_horizonassimilator_conversion_NativeGgufEngine_nativeConvertToG
     if (output_file != nullptr) {
         env->ReleaseStringUTFChars(output_file_path, output_file);
     }
+    if (quantization != nullptr) {
+        env->ReleaseStringUTFChars(quantization_value, quantization);
+    }
 
-    return 1;
+    return result.ok ? 0 : 1;
 }
 
 extern "C"

@@ -1,7 +1,9 @@
 package com.example.horizonassimilator.conversion
 
 import android.content.Context
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import java.io.File
 
 class AndroidSafetensorsToGgufConverter(
@@ -62,7 +64,8 @@ class AndroidSafetensorsToGgufConverter(
             val engineResult = ggufEngine.convert(
                 request = NativeGgufRequest(
                     modelDirectory = workspace.directory,
-                    outputFile = engineOutput
+                    outputFile = engineOutput,
+                    quantization = request.quantization
                 ),
                 onProgress = onProgress
             )
@@ -74,11 +77,13 @@ class AndroidSafetensorsToGgufConverter(
             }
 
             onProgress(ConversionProgress(0.95f, "Writing GGUF output"))
-            context.contentResolver.openOutputStream(request.output, "wt")?.use { output ->
-                engineOutput.inputStream().use { input ->
-                    input.copyTo(output)
-                }
-            } ?: error("Unable to open the selected GGUF output file.")
+            withContext(Dispatchers.IO) {
+                context.contentResolver.openOutputStream(request.output, "wt")?.use { output ->
+                    engineOutput.inputStream().use { input ->
+                        input.copyTo(output)
+                    }
+                } ?: error("Unable to open the selected GGUF output file.")
+            }
 
             onProgress(ConversionProgress(1f, "GGUF output written"))
         }.recoverCatching { error ->

@@ -12,6 +12,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.example.horizonassimilator.ui.home.HomeScreen
+import com.example.horizonassimilator.ui.home.QuantizationEducationScreen
 import com.example.horizonassimilator.ui.conversion.ConversionScreen
 import com.example.horizonassimilator.ui.settings.SettingsScreen
 import com.example.horizonassimilator.ui.theme.HorizonAssimilatorTheme
@@ -39,6 +40,9 @@ class MainActivity : ComponentActivity() {
                                 onSelectModelClick = {
                                     navController.navigate("selectModel")
                                 },
+                                onLearnClick = {
+                                    navController.navigate("learnGguf")
+                                },
                                 onSettingsClick = {
                                     navController.navigate("settings")
                                 }
@@ -55,6 +59,14 @@ class MainActivity : ComponentActivity() {
 
                         composable("settings") {
                             SettingsScreen(
+                                onBackClick = {
+                                    navController.popBackStack()
+                                }
+                            )
+                        }
+
+                        composable("learnGguf") {
+                            QuantizationEducationScreen(
                                 onBackClick = {
                                     navController.popBackStack()
                                 }

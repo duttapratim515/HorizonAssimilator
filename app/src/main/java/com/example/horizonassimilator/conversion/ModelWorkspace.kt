@@ -31,6 +31,10 @@ class ModelWorkspacePreparer(
             context.cacheDir,
             "model-workspaces/${System.currentTimeMillis()}-${model.displayName.toSafeDirectoryName()}"
         )
+        val workspaceRoot = workspace.parentFile ?: context.cacheDir
+        check(workspaceRoot.exists() || workspaceRoot.mkdirs()) {
+            "Unable to create model workspace root."
+        }
         validateFreeStorage(model, workspace)
         check(workspace.mkdirs()) {
             "Unable to create model workspace."
@@ -98,7 +102,8 @@ class ModelWorkspacePreparer(
         }
 
         val requiredBytes = knownSelectedBytes * ConversionLimits.WORKSPACE_STORAGE_MULTIPLIER
-        val availableBytes = workspace.parentFile?.usableSpace ?: context.cacheDir.usableSpace
+        val storageRoot = workspace.parentFile?.takeIf { it.exists() } ?: context.cacheDir
+        val availableBytes = storageRoot.usableSpace
 
         if (availableBytes < requiredBytes) {
             error(

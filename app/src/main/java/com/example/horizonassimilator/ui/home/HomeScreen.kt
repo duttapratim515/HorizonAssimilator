@@ -28,6 +28,7 @@ import com.example.horizonassimilator.R
 fun HomeScreen(
     modifier: Modifier = Modifier,
     onSelectModelClick: () -> Unit = {},
+    onLearnClick: () -> Unit = {},
     onSettingsClick: () -> Unit = {}
 ) {
     Box(
@@ -74,6 +75,10 @@ fun HomeScreen(
 
             Text("Convert safetensors to GGUF")
 
+            Spacer(modifier = Modifier.height(4.dp))
+
+            Text("abcd")
+
             Spacer(modifier = Modifier.height(24.dp))
 
             Button(
@@ -81,6 +86,18 @@ fun HomeScreen(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text("Select Model")
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Button(
+                onClick = onLearnClick,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(
+                    contentColor = Color.Black
+                )
+            ) {
+                Text("Learn GGUF")
             }
 
             Spacer(modifier = Modifier.height(12.dp))

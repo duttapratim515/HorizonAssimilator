@@ -1,11 +1,14 @@
 package com.example.horizonassimilator.conversion
 
 import android.os.Build
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 
 data class NativeGgufRequest(
     val modelDirectory: File,
-    val outputFile: File
+    val outputFile: File,
+    val quantization: GgufQuantization
 )
 
 interface GgufEngine {
@@ -30,10 +33,13 @@ class NativeGgufEngine : GgufEngine {
 
             onProgress(ConversionProgress(0.25f, "Starting native GGUF engine"))
 
-            val resultCode = nativeConvertToGguf(
-                modelDirectoryPath = request.modelDirectory.absolutePath,
-                outputFilePath = request.outputFile.absolutePath
-            )
+            val resultCode = withContext(Dispatchers.Default) {
+                nativeConvertToGguf(
+                    modelDirectoryPath = request.modelDirectory.absolutePath,
+                    outputFilePath = request.outputFile.absolutePath,
+                    quantization = request.quantization.label
+                )
+            }
 
             check(resultCode == 0) {
                 nativeLastError().ifBlank { "Native GGUF conversion failed with code $resultCode." }
@@ -45,7 +51,8 @@ class NativeGgufEngine : GgufEngine {
 
     private external fun nativeConvertToGguf(
         modelDirectoryPath: String,
-        outputFilePath: String
+        outputFilePath: String,
+        quantization: String
     ): Int
 
     private external fun nativeLastError(): String

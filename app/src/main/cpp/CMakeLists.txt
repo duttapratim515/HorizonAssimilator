@@ -5,7 +5,9 @@ project(horizon_gguf_engine)
 add_library(
         horizon_gguf_engine
         SHARED
+        horizon_gguf_converter.cpp
         horizon_gguf_engine.cpp
+        horizon_gguf_writer.cpp
 )
 
 target_compile_features(horizon_gguf_engine PRIVATE cxx_std_17)
