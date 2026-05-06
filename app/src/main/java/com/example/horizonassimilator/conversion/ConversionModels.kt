@@ -84,8 +84,9 @@ enum class GgufQuantization(
     ),
     Q6_K(
         label = "Q6_K",
-        description = "Not bundled in the native writer yet.",
-        estimatedOutputRatio = 0.42
+        description = "Validation mode. Smaller than Q8_0, with K-quant packing enabled.",
+        estimatedOutputRatio = 0.42,
+        nativeWriterEnabled = true
     ),
     Q5_K_M(
         label = "Q5_K_M",

@@ -1,5 +1,6 @@
 #include "horizon_gguf_writer.h"
 
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -9,6 +10,8 @@ namespace {
 constexpr uint32_t kGgufMagic = 0x46554747;
 constexpr uint32_t kGgufVersion = 3;
 constexpr uint64_t kDefaultAlignment = 32;
+constexpr int kQkK = 256;
+constexpr float kGroupMaxEps = 1e-15f;
 
 template <typename T>
 void append_plain(std::vector<uint8_t> &buffer, T value) {
@@ -347,6 +350,143 @@ float read_source_float(
     return float16_bits_to_float32(read_little_u16(bytes));
 }
 
+int nearest_int(float value) {
+    return static_cast<int>(std::nearbyintf(value));
+}
+
+int clamp_int(int value, int low, int high) {
+    if (value < low) {
+        return low;
+    }
+    if (value > high) {
+        return high;
+    }
+    return value;
+}
+
+float make_qx_quants(
+        int n,
+        int nmax,
+        const float *values,
+        int8_t *levels) {
+    float max = 0.0f;
+    float amax = 0.0f;
+    for (int index = 0; index < n; ++index) {
+        const float absolute = std::fabs(values[index]);
+        if (absolute > amax) {
+            amax = absolute;
+            max = values[index];
+        }
+    }
+    if (amax < kGroupMaxEps) {
+        std::memset(levels, 0, static_cast<size_t>(n));
+        return 0.0f;
+    }
+
+    float iscale = -static_cast<float>(nmax) / max;
+    float sumlx = 0.0f;
+    float suml2 = 0.0f;
+    for (int index = 0; index < n; ++index) {
+        const int level = clamp_int(nearest_int(iscale * values[index]), -nmax, nmax - 1);
+        levels[index] = static_cast<int8_t>(level + nmax);
+        const float weight = values[index] * values[index];
+        sumlx += weight * values[index] * static_cast<float>(level);
+        suml2 += weight * static_cast<float>(level * level);
+    }
+
+    float scale = suml2 != 0.0f ? sumlx / suml2 : 0.0f;
+    float best = scale * sumlx;
+    for (int step = -9; step <= 9; ++step) {
+        if (step == 0) {
+            continue;
+        }
+        iscale = -(static_cast<float>(nmax) + 0.1f * static_cast<float>(step)) / max;
+        sumlx = 0.0f;
+        suml2 = 0.0f;
+        for (int index = 0; index < n; ++index) {
+            const int level = clamp_int(nearest_int(iscale * values[index]), -nmax, nmax - 1);
+            const float weight = values[index] * values[index];
+            sumlx += weight * values[index] * static_cast<float>(level);
+            suml2 += weight * static_cast<float>(level * level);
+        }
+        if (suml2 > 0.0f && sumlx * sumlx > best * suml2) {
+            for (int index = 0; index < n; ++index) {
+                const int level = clamp_int(nearest_int(iscale * values[index]), -nmax, nmax - 1);
+                levels[index] = static_cast<int8_t>(level + nmax);
+            }
+            scale = sumlx / suml2;
+            best = scale * sumlx;
+        }
+    }
+    return scale;
+}
+
+void quantize_q6_k_block(const float *values, char *encoded) {
+    int8_t levels[kQkK] = {};
+    float scales[kQkK / 16] = {};
+
+    float max_scale = 0.0f;
+    float max_abs_scale = 0.0f;
+    for (int block = 0; block < kQkK / 16; ++block) {
+        const float scale = make_qx_quants(16, 32, values + 16 * block, levels + 16 * block);
+        scales[block] = scale;
+
+        const float abs_scale = std::fabs(scale);
+        if (abs_scale > max_abs_scale) {
+            max_abs_scale = abs_scale;
+            max_scale = scale;
+        }
+    }
+
+    std::memset(encoded, 0, 210);
+    if (max_abs_scale < kGroupMaxEps) {
+        return;
+    }
+
+    const float iscale = -128.0f / max_scale;
+    const uint16_t d = float32_bits_to_float16(float32_to_bits(1.0f / iscale));
+    uint8_t *ql = reinterpret_cast<uint8_t *>(encoded);
+    uint8_t *qh = reinterpret_cast<uint8_t *>(encoded + 128);
+    int8_t *block_scales = reinterpret_cast<int8_t *>(encoded + 192);
+    encoded[208] = static_cast<char>(d & 0xFFU);
+    encoded[209] = static_cast<char>((d >> 8) & 0xFFU);
+
+    const float super_scale = float16_bits_to_float32(d);
+    for (int block = 0; block < kQkK / 16; ++block) {
+        const int scale = clamp_int(nearest_int(iscale * scales[block]), -128, 127);
+        block_scales[block] = static_cast<int8_t>(scale);
+    }
+
+    for (int block = 0; block < kQkK / 16; ++block) {
+        const float local_scale = super_scale * static_cast<float>(block_scales[block]);
+        if (local_scale == 0.0f) {
+            continue;
+        }
+        for (int index = 0; index < 16; ++index) {
+            const int level = clamp_int(nearest_int(values[16 * block + index] / local_scale), -32, 31);
+            levels[16 * block + index] = static_cast<int8_t>(level + 32);
+        }
+    }
+
+    for (int base = 0; base < kQkK; base += 128) {
+        for (int offset = 0; offset < 32; ++offset) {
+            const uint8_t q1 = static_cast<uint8_t>(levels[base + offset + 0]) & 0x0FU;
+            const uint8_t q2 = static_cast<uint8_t>(levels[base + offset + 32]) & 0x0FU;
+            const uint8_t q3 = static_cast<uint8_t>(levels[base + offset + 64]) & 0x0FU;
+            const uint8_t q4 = static_cast<uint8_t>(levels[base + offset + 96]) & 0x0FU;
+            ql[offset + 0] = static_cast<uint8_t>(q1 | (q3 << 4));
+            ql[offset + 32] = static_cast<uint8_t>(q2 | (q4 << 4));
+            qh[offset] = static_cast<uint8_t>(
+                    (levels[base + offset + 0] >> 4) |
+                    ((levels[base + offset + 32] >> 4) << 2) |
+                    ((levels[base + offset + 64] >> 4) << 4) |
+                    ((levels[base + offset + 96] >> 4) << 6));
+        }
+        ql += 64;
+        qh += 32;
+    }
+}
+
 bool convert_range_to_f32(
         const HorizonGgufTensorSource &tensor,
         std::ofstream &output,
@@ -477,6 +617,53 @@ bool quantize_range_to_q8_0(
     return true;
 }
 
+bool quantize_range_to_q6_k(
+        const HorizonGgufTensorSource &tensor,
+        std::ofstream &output,
+        std::string &error) {
+    const uint64_t source_stride = tensor.source_encoding == HorizonTensorEncoding::F32 ? 4 : 2;
+    const uint64_t element_count = tensor.source_data_size / source_stride;
+    if (tensor.source_data_size % source_stride != 0 || element_count % kQkK != 0) {
+        error = "Tensor " + tensor.name + " cannot be Q6_K quantized because its element count is not a multiple of 256.";
+        return false;
+    }
+
+    std::ifstream input(tensor.source_path, std::ios::binary);
+    if (!input) {
+        error = "Unable to open tensor source " + tensor.source_path + ".";
+        return false;
+    }
+    input.seekg(static_cast<std::streamoff>(tensor.source_offset), std::ios::beg);
+    if (!input) {
+        error = "Unable to seek tensor source " + tensor.source_path + ".";
+        return false;
+    }
+
+    std::vector<char> source_block(static_cast<size_t>(source_stride * kQkK));
+    std::vector<float> values(kQkK);
+    char encoded[210] = {};
+    for (uint64_t block = 0; block < element_count / kQkK; ++block) {
+        input.read(source_block.data(), static_cast<std::streamsize>(source_block.size()));
+        if (static_cast<size_t>(input.gcount()) != source_block.size()) {
+            error = "Unable to read tensor data for " + tensor.name + ".";
+            return false;
+        }
+
+        for (int index = 0; index < kQkK; ++index) {
+            values[index] = read_source_float(source_block.data() + index * source_stride, tensor.source_encoding);
+        }
+        quantize_q6_k_block(values.data(), encoded);
+
+        output.write(encoded, sizeof(encoded));
+        if (!output) {
+            error = "Unable to write Q6_K tensor data for " + tensor.name + ".";
+            return false;
+        }
+    }
+
+    return true;
+}
+
 bool write_tensor_data(
         const HorizonGgufTensorSource &tensor,
         std::ofstream &output,
@@ -493,6 +680,9 @@ bool write_tensor_data(
     }
     if (tensor.output_encoding == HorizonTensorOutputEncoding::Q8_0) {
         return quantize_range_to_q8_0(tensor, output, error);
+    }
+    if (tensor.output_encoding == HorizonTensorOutputEncoding::Q6_K) {
+        return quantize_range_to_q6_k(tensor, output, error);
     }
     if (tensor.source_encoding == HorizonTensorEncoding::F16) {
         return copy_range(tensor, output, error);
