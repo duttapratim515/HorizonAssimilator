@@ -708,6 +708,92 @@ void quantize_q5_k_block(const float *values, char *encoded) {
     }
 }
 
+void quantize_q4_k_block(const float *values, char *encoded) {
+    uint8_t levels[kQkK] = {};
+    float mins[kQkK / 32] = {};
+    float scales[kQkK / 32] = {};
+    float weights[32] = {};
+    uint8_t scratch[32] = {};
+
+    float max_scale = 0.0f;
+    float max_min = 0.0f;
+    for (int block = 0; block < kQkK / 32; ++block) {
+        float sum_x2 = 0.0f;
+        for (int index = 0; index < 32; ++index) {
+            const float value = values[32 * block + index];
+            sum_x2 += value * value;
+        }
+        const float average_abs = std::sqrt(sum_x2 / 32.0f);
+        for (int index = 0; index < 32; ++index) {
+            weights[index] = average_abs + std::fabs(values[32 * block + index]);
+        }
+
+        scales[block] = make_qkx2_quants(
+                32,
+                15,
+                values + 32 * block,
+                weights,
+                levels + 32 * block,
+                &mins[block],
+                scratch,
+                -1.0f,
+                0.1f,
+                20,
+                false);
+        if (scales[block] > max_scale) {
+            max_scale = scales[block];
+        }
+        if (mins[block] > max_min) {
+            max_min = mins[block];
+        }
+    }
+
+    std::memset(encoded, 0, 144);
+    uint8_t *packed_scales = reinterpret_cast<uint8_t *>(encoded + 4);
+    uint8_t *packed_levels = reinterpret_cast<uint8_t *>(encoded + 16);
+
+    const float inv_scale = max_scale > 0.0f ? 63.0f / max_scale : 0.0f;
+    const float inv_min = max_min > 0.0f ? 63.0f / max_min : 0.0f;
+    for (int block = 0; block < kQkK / 32; ++block) {
+        const uint8_t scale = static_cast<uint8_t>(clamp_int(nearest_int(inv_scale * scales[block]), 0, 63));
+        const uint8_t min = static_cast<uint8_t>(clamp_int(nearest_int(inv_min * mins[block]), 0, 63));
+        write_scale_min_k4(block, packed_scales, scale, min);
+    }
+
+    const uint16_t d = float32_bits_to_float16(float32_to_bits(max_scale / 63.0f));
+    const uint16_t dmin = float32_bits_to_float16(float32_to_bits(max_min / 63.0f));
+    encoded[0] = static_cast<char>(d & 0xFFU);
+    encoded[1] = static_cast<char>((d >> 8) & 0xFFU);
+    encoded[2] = static_cast<char>(dmin & 0xFFU);
+    encoded[3] = static_cast<char>((dmin >> 8) & 0xFFU);
+
+    const float super_scale = float16_bits_to_float32(d);
+    const float super_min = float16_bits_to_float32(dmin);
+    for (int block = 0; block < kQkK / 32; ++block) {
+        uint8_t scale = 0;
+        uint8_t min = 0;
+        read_scale_min_k4(block, packed_scales, &scale, &min);
+        const float local_scale = super_scale * static_cast<float>(scale);
+        if (local_scale == 0.0f) {
+            continue;
+        }
+        const float local_min = super_min * static_cast<float>(min);
+        for (int index = 0; index < 32; ++index) {
+            const int level = clamp_int(nearest_int((values[32 * block + index] + local_min) / local_scale), 0, 15);
+            levels[32 * block + index] = static_cast<uint8_t>(level);
+        }
+    }
+
+    for (int base = 0; base < kQkK; base += 64) {
+        for (int offset = 0; offset < 32; ++offset) {
+            packed_levels[offset] = static_cast<uint8_t>(
+                    levels[base + offset] |
+                    (levels[base + offset + 32] << 4));
+        }
+        packed_levels += 32;
+    }
+}
+
 bool convert_range_to_f32(
         const HorizonGgufTensorSource &tensor,
         std::ofstream &output,
@@ -932,6 +1018,53 @@ bool quantize_range_to_q5_k(
     return true;
 }
 
+bool quantize_range_to_q4_k(
+        const HorizonGgufTensorSource &tensor,
+        std::ofstream &output,
+        std::string &error) {
+    const uint64_t source_stride = tensor.source_encoding == HorizonTensorEncoding::F32 ? 4 : 2;
+    const uint64_t element_count = tensor.source_data_size / source_stride;
+    if (tensor.source_data_size % source_stride != 0 || element_count % kQkK != 0) {
+        error = "Tensor " + tensor.name + " cannot be Q4_K quantized because its element count is not a multiple of 256.";
+        return false;
+    }
+
+    std::ifstream input(tensor.source_path, std::ios::binary);
+    if (!input) {
+        error = "Unable to open tensor source " + tensor.source_path + ".";
+        return false;
+    }
+    input.seekg(static_cast<std::streamoff>(tensor.source_offset), std::ios::beg);
+    if (!input) {
+        error = "Unable to seek tensor source " + tensor.source_path + ".";
+        return false;
+    }
+
+    std::vector<char> source_block(static_cast<size_t>(source_stride * kQkK));
+    std::vector<float> values(kQkK);
+    char encoded[144] = {};
+    for (uint64_t block = 0; block < element_count / kQkK; ++block) {
+        input.read(source_block.data(), static_cast<std::streamsize>(source_block.size()));
+        if (static_cast<size_t>(input.gcount()) != source_block.size()) {
+            error = "Unable to read tensor data for " + tensor.name + ".";
+            return false;
+        }
+
+        for (int index = 0; index < kQkK; ++index) {
+            values[index] = read_source_float(source_block.data() + index * source_stride, tensor.source_encoding);
+        }
+        quantize_q4_k_block(values.data(), encoded);
+
+        output.write(encoded, sizeof(encoded));
+        if (!output) {
+            error = "Unable to write Q4_K tensor data for " + tensor.name + ".";
+            return false;
+        }
+    }
+
+    return true;
+}
+
 bool write_tensor_data(
         const HorizonGgufTensorSource &tensor,
         std::ofstream &output,
@@ -954,6 +1087,9 @@ bool write_tensor_data(
     }
     if (tensor.output_encoding == HorizonTensorOutputEncoding::Q5_K) {
         return quantize_range_to_q5_k(tensor, output, error);
+    }
+    if (tensor.output_encoding == HorizonTensorOutputEncoding::Q4_K) {
+        return quantize_range_to_q4_k(tensor, output, error);
     }
     if (tensor.source_encoding == HorizonTensorEncoding::F16) {
         return copy_range(tensor, output, error);

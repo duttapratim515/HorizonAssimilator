@@ -96,13 +96,15 @@ enum class GgufQuantization(
     ),
     Q4_K_M(
         label = "Q4_K_M",
-        description = "Not bundled in the native writer yet.",
-        estimatedOutputRatio = 0.29
+        description = "Validation mode. Compact 4-bit K-quant output for mobile GGUF files.",
+        estimatedOutputRatio = 0.29,
+        nativeWriterEnabled = true
     ),
     Q4_K_S(
         label = "Q4_K_S",
-        description = "Not bundled in the native writer yet.",
-        estimatedOutputRatio = 0.27
+        description = "Validation mode. Compact 4-bit K-quant output with the smallest enabled profile.",
+        estimatedOutputRatio = 0.27,
+        nativeWriterEnabled = true
     ),
     Q3_K_M(
         label = "Q3_K_M",

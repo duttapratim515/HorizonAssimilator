@@ -230,7 +230,7 @@ private fun QuantizationSelector(
             style = MaterialTheme.typography.bodySmall
         )
         Text(
-            text = "F16, Q8_0, Q6_K, and Q5_K_M are enabled for validation in this build.",
+            text = "F16, Q8_0, Q6_K, Q5_K_M, Q4_K_M, and Q4_K_S are enabled for validation in this build.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.primary
         )
