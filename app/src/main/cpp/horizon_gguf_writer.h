@@ -18,6 +18,7 @@ enum class HorizonTensorOutputEncoding {
     Q6_K,
     Q5_K,
     Q4_K,
+    Q3_K,
 };
 
 struct HorizonGgufTensorSource {

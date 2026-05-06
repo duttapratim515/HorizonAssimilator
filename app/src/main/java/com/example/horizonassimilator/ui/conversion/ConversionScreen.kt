@@ -229,11 +229,6 @@ private fun QuantizationSelector(
             text = selected.description,
             style = MaterialTheme.typography.bodySmall
         )
-        Text(
-            text = "F16, Q8_0, Q6_K, Q5_K_M, Q4_K_M, and Q4_K_S are enabled for validation in this build.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.primary
-        )
         GgufQuantization.entries.chunked(2).forEach { rowItems ->
             Row(
                 modifier = Modifier.fillMaxWidth(),

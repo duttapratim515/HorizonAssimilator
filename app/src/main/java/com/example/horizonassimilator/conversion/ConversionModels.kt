@@ -108,7 +108,8 @@ enum class GgufQuantization(
     ),
     Q3_K_M(
         label = "Q3_K_M",
-        description = "Not bundled in the native writer yet.",
-        estimatedOutputRatio = 0.22
+        description = "Validation mode. Smallest enabled K-quant output for aggressive mobile compression.",
+        estimatedOutputRatio = 0.22,
+        nativeWriterEnabled = true
     )
 }

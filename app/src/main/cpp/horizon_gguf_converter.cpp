@@ -293,7 +293,8 @@ uint64_t safetensors_dtype_bytes(const std::string &dtype) {
 
 bool is_supported_native_output_quantization(const std::string &quantization) {
     return quantization == "F16" || quantization == "Q8_0" || quantization == "Q6_K" ||
-           quantization == "Q5_K_M" || quantization == "Q4_K_M" || quantization == "Q4_K_S";
+           quantization == "Q5_K_M" || quantization == "Q4_K_M" || quantization == "Q4_K_S" ||
+           quantization == "Q3_K_M";
 }
 
 bool should_quantize_tensor_q8_0(
@@ -333,6 +334,18 @@ bool should_quantize_tensor_q5_k(
 }
 
 bool should_quantize_tensor_q4_k(
+        const SafetensorsTensor &tensor,
+        uint64_t element_count) {
+    return tensor.shape.size() >= 2 &&
+           !tensor.shape.empty() &&
+           tensor.gguf_name != "output.weight" &&
+           tensor.gguf_name.find(".attn_q.weight") == std::string::npos &&
+           tensor.gguf_name.find(".attn_k.weight") == std::string::npos &&
+           tensor.shape.back() % 256 == 0 &&
+           element_count % 256 == 0;
+}
+
+bool should_quantize_tensor_q3_k(
         const SafetensorsTensor &tensor,
         uint64_t element_count) {
     return tensor.shape.size() >= 2 &&
@@ -385,6 +398,9 @@ uint32_t output_ggml_type_for_tensor(
             should_quantize_tensor_q4_k(tensor, element_count)) {
         return 12;
     }
+    if (quantization == "Q3_K_M" && should_quantize_tensor_q3_k(tensor, element_count)) {
+        return 11;
+    }
     return 1;
 }
 
@@ -409,6 +425,9 @@ HorizonTensorOutputEncoding output_encoding_for_tensor(
             should_quantize_tensor_q4_k(tensor, element_count)) {
         return HorizonTensorOutputEncoding::Q4_K;
     }
+    if (quantization == "Q3_K_M" && should_quantize_tensor_q3_k(tensor, element_count)) {
+        return HorizonTensorOutputEncoding::Q3_K;
+    }
     return HorizonTensorOutputEncoding::F16;
 }
 
@@ -432,6 +451,9 @@ uint64_t output_data_size_for_tensor(
     if ((quantization == "Q4_K_M" || quantization == "Q4_K_S") &&
             should_quantize_tensor_q4_k(tensor, element_count)) {
         return (element_count / 256) * 144;
+    }
+    if (quantization == "Q3_K_M" && should_quantize_tensor_q3_k(tensor, element_count)) {
+        return (element_count / 256) * 110;
     }
     return element_count * 2;
 }
@@ -1132,7 +1154,7 @@ HorizonConversionSummary inspect_hf_safetensors_model(
 
     if (!is_supported_native_output_quantization(quantization)) {
         std::ostringstream blocked;
-        blocked << "Native GGUF writing currently supports F16, Q8_0, Q6_K, Q5_K_M, Q4_K_M, and Q4_K_S output. Requested " << quantization
+        blocked << "Native GGUF writing currently supports F16, Q8_0, Q6_K, Q5_K_M, Q4_K_M, Q4_K_S, and Q3_K_M output. Requested " << quantization
                 << " still needs native quantization kernels.";
         return {false, blocked.str()};
     }

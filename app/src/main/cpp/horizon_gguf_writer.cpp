@@ -421,6 +421,67 @@ float make_qx_quants(
     return scale;
 }
 
+float make_q3_quants(
+        int n,
+        int nmax,
+        const float *values,
+        int8_t *levels) {
+    float max = 0.0f;
+    float amax = 0.0f;
+    for (int index = 0; index < n; ++index) {
+        const float absolute = std::fabs(values[index]);
+        if (absolute > amax) {
+            amax = absolute;
+            max = values[index];
+        }
+    }
+    if (amax < kGroupMaxEps) {
+        std::memset(levels, 0, static_cast<size_t>(n));
+        return 0.0f;
+    }
+
+    float iscale = -static_cast<float>(nmax) / max;
+    float sumlx = 0.0f;
+    float suml2 = 0.0f;
+    for (int index = 0; index < n; ++index) {
+        const int level = clamp_int(nearest_int(iscale * values[index]), -nmax, nmax - 1);
+        levels[index] = static_cast<int8_t>(level);
+        const float weight = values[index] * values[index];
+        sumlx += weight * values[index] * static_cast<float>(level);
+        suml2 += weight * static_cast<float>(level * level);
+    }
+
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        int changed = 0;
+        for (int index = 0; index < n; ++index) {
+            const float weight = values[index] * values[index];
+            float slx = sumlx - weight * values[index] * static_cast<float>(levels[index]);
+            if (slx > 0.0f) {
+                float sl2 = suml2 - weight * static_cast<float>(levels[index] * levels[index]);
+                const int new_level = clamp_int(nearest_int(values[index] * sl2 / slx), -nmax, nmax - 1);
+                if (new_level != levels[index]) {
+                    slx += weight * values[index] * static_cast<float>(new_level);
+                    sl2 += weight * static_cast<float>(new_level * new_level);
+                    if (sl2 > 0.0f && slx * slx * suml2 > sumlx * sumlx * sl2) {
+                        levels[index] = static_cast<int8_t>(new_level);
+                        sumlx = slx;
+                        suml2 = sl2;
+                        changed += 1;
+                    }
+                }
+            }
+        }
+        if (changed == 0) {
+            break;
+        }
+    }
+
+    for (int index = 0; index < n; ++index) {
+        levels[index] = static_cast<int8_t>(levels[index] + nmax);
+    }
+    return suml2 > 0.0f ? sumlx / suml2 : 0.0f;
+}
+
 float make_qkx2_quants(
         int n,
         int nmax,
@@ -606,6 +667,90 @@ void quantize_q6_k_block(const float *values, char *encoded) {
         }
         ql += 64;
         qh += 32;
+    }
+}
+
+void quantize_q3_k_block(const float *values, char *encoded) {
+    int8_t levels[kQkK] = {};
+    float scales[kQkK / 16] = {};
+
+    float max_scale = 0.0f;
+    float max_abs_scale = 0.0f;
+    for (int block = 0; block < kQkK / 16; ++block) {
+        scales[block] = make_q3_quants(16, 4, values + 16 * block, levels + 16 * block);
+        const float abs_scale = std::fabs(scales[block]);
+        if (abs_scale > max_abs_scale) {
+            max_abs_scale = abs_scale;
+            max_scale = scales[block];
+        }
+    }
+
+    std::memset(encoded, 0, 110);
+    uint8_t *high_mask = reinterpret_cast<uint8_t *>(encoded);
+    uint8_t *packed_levels = reinterpret_cast<uint8_t *>(encoded + 32);
+    uint8_t *packed_scales = reinterpret_cast<uint8_t *>(encoded + 96);
+
+    uint16_t d = 0;
+    if (max_scale != 0.0f) {
+        const float iscale = -32.0f / max_scale;
+        for (int block = 0; block < kQkK / 16; ++block) {
+            int8_t scale = static_cast<int8_t>(clamp_int(nearest_int(iscale * scales[block]), -32, 31) + 32);
+            if (block < 8) {
+                packed_scales[block] = static_cast<uint8_t>(scale & 0x0F);
+            } else {
+                packed_scales[block - 8] = static_cast<uint8_t>(packed_scales[block - 8] | ((scale & 0x0F) << 4));
+            }
+            scale = static_cast<int8_t>(scale >> 4);
+            packed_scales[block % 4 + 8] = static_cast<uint8_t>(
+                    packed_scales[block % 4 + 8] |
+                    (scale << (2 * (block / 4))));
+        }
+        d = float32_bits_to_float16(float32_to_bits(1.0f / iscale));
+    }
+    encoded[108] = static_cast<char>(d & 0xFFU);
+    encoded[109] = static_cast<char>((d >> 8) & 0xFFU);
+
+    const float super_scale = float16_bits_to_float32(d);
+    for (int block = 0; block < kQkK / 16; ++block) {
+        int8_t scale = block < 8
+                ? static_cast<int8_t>(packed_scales[block] & 0x0F)
+                : static_cast<int8_t>(packed_scales[block - 8] >> 4);
+        scale = static_cast<int8_t>(
+                (scale |
+                 (((packed_scales[8 + block % 4] >> (2 * (block / 4))) & 0x03) << 4)) -
+                32);
+        const float local_scale = super_scale * static_cast<float>(scale);
+        if (local_scale == 0.0f) {
+            continue;
+        }
+        for (int index = 0; index < 16; ++index) {
+            const int level = clamp_int(nearest_int(values[16 * block + index] / local_scale), -4, 3);
+            levels[16 * block + index] = static_cast<int8_t>(level + 4);
+        }
+    }
+
+    int mask_index = 0;
+    uint8_t mask_bit = 1;
+    for (int index = 0; index < kQkK; ++index) {
+        if (levels[index] > 3) {
+            high_mask[mask_index] = static_cast<uint8_t>(high_mask[mask_index] | mask_bit);
+            levels[index] = static_cast<int8_t>(levels[index] - 4);
+        }
+        mask_index += 1;
+        if (mask_index == kQkK / 8) {
+            mask_index = 0;
+            mask_bit = static_cast<uint8_t>(mask_bit << 1);
+        }
+    }
+
+    for (int base = 0; base < kQkK; base += 128) {
+        for (int offset = 0; offset < 32; ++offset) {
+            packed_levels[base / 4 + offset] = static_cast<uint8_t>(
+                    levels[base + offset] |
+                    (levels[base + offset + 32] << 2) |
+                    (levels[base + offset + 64] << 4) |
+                    (levels[base + offset + 96] << 6));
+        }
     }
 }
 
@@ -971,6 +1116,53 @@ bool quantize_range_to_q6_k(
     return true;
 }
 
+bool quantize_range_to_q3_k(
+        const HorizonGgufTensorSource &tensor,
+        std::ofstream &output,
+        std::string &error) {
+    const uint64_t source_stride = tensor.source_encoding == HorizonTensorEncoding::F32 ? 4 : 2;
+    const uint64_t element_count = tensor.source_data_size / source_stride;
+    if (tensor.source_data_size % source_stride != 0 || element_count % kQkK != 0) {
+        error = "Tensor " + tensor.name + " cannot be Q3_K quantized because its element count is not a multiple of 256.";
+        return false;
+    }
+
+    std::ifstream input(tensor.source_path, std::ios::binary);
+    if (!input) {
+        error = "Unable to open tensor source " + tensor.source_path + ".";
+        return false;
+    }
+    input.seekg(static_cast<std::streamoff>(tensor.source_offset), std::ios::beg);
+    if (!input) {
+        error = "Unable to seek tensor source " + tensor.source_path + ".";
+        return false;
+    }
+
+    std::vector<char> source_block(static_cast<size_t>(source_stride * kQkK));
+    std::vector<float> values(kQkK);
+    char encoded[110] = {};
+    for (uint64_t block = 0; block < element_count / kQkK; ++block) {
+        input.read(source_block.data(), static_cast<std::streamsize>(source_block.size()));
+        if (static_cast<size_t>(input.gcount()) != source_block.size()) {
+            error = "Unable to read tensor data for " + tensor.name + ".";
+            return false;
+        }
+
+        for (int index = 0; index < kQkK; ++index) {
+            values[index] = read_source_float(source_block.data() + index * source_stride, tensor.source_encoding);
+        }
+        quantize_q3_k_block(values.data(), encoded);
+
+        output.write(encoded, sizeof(encoded));
+        if (!output) {
+            error = "Unable to write Q3_K tensor data for " + tensor.name + ".";
+            return false;
+        }
+    }
+
+    return true;
+}
+
 bool quantize_range_to_q5_k(
         const HorizonGgufTensorSource &tensor,
         std::ofstream &output,
@@ -1084,6 +1276,9 @@ bool write_tensor_data(
     }
     if (tensor.output_encoding == HorizonTensorOutputEncoding::Q6_K) {
         return quantize_range_to_q6_k(tensor, output, error);
+    }
+    if (tensor.output_encoding == HorizonTensorOutputEncoding::Q3_K) {
+        return quantize_range_to_q3_k(tensor, output, error);
     }
     if (tensor.output_encoding == HorizonTensorOutputEncoding::Q5_K) {
         return quantize_range_to_q5_k(tensor, output, error);
