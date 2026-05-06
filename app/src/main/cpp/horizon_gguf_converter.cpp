@@ -692,6 +692,44 @@ std::vector<int32_t> build_token_types(const std::string &tokenizer_json, size_t
     return token_types;
 }
 
+std::vector<int32_t> build_token_types(
+        const std::string &tokenizer_json,
+        const std::vector<std::string> &tokens) {
+    std::vector<int32_t> token_types = build_token_types(tokenizer_json, tokens.size());
+    constexpr int32_t kByteToken = 6;
+
+    for (size_t index = 0; index < tokens.size(); ++index) {
+        const std::string &token = tokens[index];
+        if (token.size() == 6 &&
+            token[0] == '<' &&
+            token[1] == '0' &&
+            token[2] == 'x' &&
+            std::isxdigit(static_cast<unsigned char>(token[3])) &&
+            std::isxdigit(static_cast<unsigned char>(token[4])) &&
+            token[5] == '>') {
+            token_types[index] = kByteToken;
+        }
+    }
+
+    return token_types;
+}
+
+std::string tokenizer_pre_for_model(
+        const std::string &tokenizer_model,
+        uint32_t vocab_size) {
+    if (tokenizer_model != "gpt2") {
+        return "default";
+    }
+    if (vocab_size == 49152) {
+        return "smollm";
+    }
+    return "default";
+}
+
+bool should_add_bos_token(uint32_t vocab_size) {
+    return vocab_size != 49152;
+}
+
 std::string gguf_architecture_name(const std::string &architecture, const std::string &model_type) {
     std::string source = !model_type.empty() ? model_type : architecture;
     std::transform(source.begin(), source.end(), source.begin(), [](char value) {
@@ -753,8 +791,9 @@ HorizonGgufMetadataWriter build_llama_metadata_writer(
     writer.add_uint32("general.quantization_version", 2);
 
     const std::string prefix = gguf_arch.empty() ? "llama" : gguf_arch;
+    const uint32_t vocab_size = static_cast<uint32_t>(tokens.size());
     writer.add_uint32(prefix + ".context_length", extract_json_uint32(config_json, "max_position_embeddings", 0));
-    writer.add_uint32(prefix + ".vocab_size", static_cast<uint32_t>(tokens.size()));
+    writer.add_uint32(prefix + ".vocab_size", vocab_size);
     writer.add_uint32(prefix + ".embedding_length", extract_json_uint32(config_json, "hidden_size", 0));
     writer.add_uint32(prefix + ".block_count", extract_json_uint32(config_json, "num_hidden_layers", 0));
     writer.add_uint32(prefix + ".feed_forward_length", extract_json_uint32(config_json, "intermediate_size", 0));
@@ -762,14 +801,12 @@ HorizonGgufMetadataWriter build_llama_metadata_writer(
     writer.add_uint32(prefix + ".attention.head_count", head_count);
     writer.add_uint32(prefix + ".attention.head_count_kv", extract_json_uint32(config_json, "num_key_value_heads", head_count));
     writer.add_uint32(prefix + ".rope.dimension_count", extract_json_uint32(config_json, "hidden_size", 0) / (head_count == 0 ? 1 : head_count));
-    writer.add_float32(prefix + ".rope.freq_base", 10000.0f);
+    writer.add_float32(prefix + ".rope.freq_base", extract_json_float(config_json, "rope_theta", 10000.0f));
     writer.add_float32(
             prefix + ".attention.layer_norm_rms_epsilon",
             extract_json_float(config_json, "rms_norm_eps", 0.00001f));
     writer.add_string("tokenizer.ggml.model", tokenizer_model);
-    if (tokenizer_model == "gpt2") {
-        writer.add_string("tokenizer.ggml.pre", "default");
-    }
+    writer.add_string("tokenizer.ggml.pre", tokenizer_pre_for_model(tokenizer_model, vocab_size));
     writer.add_string_array("tokenizer.ggml.tokens", tokens);
     writer.add_float32_array("tokenizer.ggml.scores", std::vector<float>(tokens.size(), 0.0f));
     writer.add_int32_array("tokenizer.ggml.token_type", token_types);
@@ -779,7 +816,7 @@ HorizonGgufMetadataWriter build_llama_metadata_writer(
     writer.add_uint32("tokenizer.ggml.bos_token_id", extract_json_uint32(config_json, "bos_token_id", 1));
     writer.add_uint32("tokenizer.ggml.eos_token_id", extract_json_uint32(config_json, "eos_token_id", 2));
     writer.add_uint32("tokenizer.ggml.unknown_token_id", extract_json_uint32(config_json, "unk_token_id", 0));
-    writer.add_bool("tokenizer.ggml.add_bos_token", true);
+    writer.add_bool("tokenizer.ggml.add_bos_token", should_add_bos_token(vocab_size));
     writer.add_bool("tokenizer.ggml.add_eos_token", false);
 
     return writer;
@@ -1035,7 +1072,7 @@ HorizonConversionSummary inspect_hf_safetensors_model(
     const uint32_t attention_head_count = extract_json_uint32(config_json, "num_attention_heads", 0);
     const uint32_t key_value_head_count =
             extract_json_uint32(config_json, "num_key_value_heads", attention_head_count);
-    const std::vector<int32_t> token_types = build_token_types(tokenizer_json, tokens.size());
+    const std::vector<int32_t> token_types = build_token_types(tokenizer_json, tokens);
     HorizonGgufMetadataWriter metadata_writer = build_llama_metadata_writer(
             config_json,
             tokens,
