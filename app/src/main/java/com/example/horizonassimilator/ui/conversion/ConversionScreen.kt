@@ -230,7 +230,7 @@ private fun QuantizationSelector(
             style = MaterialTheme.typography.bodySmall
         )
         Text(
-            text = "F16 is locked for validation in this build.",
+            text = "F16 and Q8_0 are enabled for validation in this build.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.primary
         )

@@ -75,10 +75,6 @@ fun HomeScreen(
 
             Text("Convert safetensors to GGUF")
 
-            Spacer(modifier = Modifier.height(4.dp))
-
-            Text("abcd")
-
             Spacer(modifier = Modifier.height(24.dp))
 
             Button(

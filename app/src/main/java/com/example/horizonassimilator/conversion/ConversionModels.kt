@@ -78,8 +78,9 @@ enum class GgufQuantization(
     ),
     Q8_0(
         label = "Q8_0",
-        description = "Temporarily disabled until F16 conversion is stable.",
-        estimatedOutputRatio = 0.55
+        description = "Validation mode. Smaller than F16, with broad tensor support for this native writer.",
+        estimatedOutputRatio = 0.55,
+        nativeWriterEnabled = true
     ),
     Q6_K(
         label = "Q6_K",
