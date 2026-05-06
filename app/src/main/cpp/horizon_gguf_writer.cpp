@@ -421,6 +421,128 @@ float make_qx_quants(
     return scale;
 }
 
+float make_qkx2_quants(
+        int n,
+        int nmax,
+        const float *values,
+        const float *weights,
+        uint8_t *levels,
+        float *the_min,
+        uint8_t *scratch,
+        float rmin,
+        float rdelta,
+        int nstep,
+        bool use_mad) {
+    float min = values[0];
+    float max = values[0];
+    float sum_w = weights[0];
+    float sum_x = sum_w * values[0];
+    for (int index = 1; index < n; ++index) {
+        if (values[index] < min) {
+            min = values[index];
+        }
+        if (values[index] > max) {
+            max = values[index];
+        }
+        const float weight = weights[index];
+        sum_w += weight;
+        sum_x += weight * values[index];
+    }
+    if (min > 0.0f) {
+        min = 0.0f;
+    }
+    if (max == min) {
+        std::memset(levels, 0, static_cast<size_t>(n));
+        *the_min = -min;
+        return 0.0f;
+    }
+
+    float iscale = static_cast<float>(nmax) / (max - min);
+    float scale = 1.0f / iscale;
+    float best_error = 0.0f;
+    for (int index = 0; index < n; ++index) {
+        const int level = clamp_int(nearest_int(iscale * (values[index] - min)), 0, nmax);
+        levels[index] = static_cast<uint8_t>(level);
+        float diff = scale * static_cast<float>(level) + min - values[index];
+        diff = use_mad ? std::fabs(diff) : diff * diff;
+        best_error += weights[index] * diff;
+    }
+    if (nstep < 1) {
+        *the_min = -min;
+        return scale;
+    }
+
+    for (int step = 0; step <= nstep; ++step) {
+        iscale = (rmin + rdelta * static_cast<float>(step) + static_cast<float>(nmax)) / (max - min);
+        float sum_l = 0.0f;
+        float sum_l2 = 0.0f;
+        float sum_xl = 0.0f;
+        for (int index = 0; index < n; ++index) {
+            const int level = clamp_int(nearest_int(iscale * (values[index] - min)), 0, nmax);
+            scratch[index] = static_cast<uint8_t>(level);
+            const float weight = weights[index];
+            sum_l += weight * static_cast<float>(level);
+            sum_l2 += weight * static_cast<float>(level * level);
+            sum_xl += weight * static_cast<float>(level) * values[index];
+        }
+
+        const float denominator = sum_w * sum_l2 - sum_l * sum_l;
+        if (denominator > 0.0f) {
+            float this_scale = (sum_w * sum_xl - sum_x * sum_l) / denominator;
+            float this_min = (sum_l2 * sum_x - sum_l * sum_xl) / denominator;
+            if (this_min > 0.0f) {
+                this_min = 0.0f;
+                this_scale = sum_xl / sum_l2;
+            }
+
+            float current_error = 0.0f;
+            for (int index = 0; index < n; ++index) {
+                float diff = this_scale * static_cast<float>(scratch[index]) + this_min - values[index];
+                diff = use_mad ? std::fabs(diff) : diff * diff;
+                current_error += weights[index] * diff;
+            }
+            if (current_error < best_error) {
+                std::memcpy(levels, scratch, static_cast<size_t>(n));
+                best_error = current_error;
+                scale = this_scale;
+                min = this_min;
+            }
+        }
+    }
+
+    *the_min = -min;
+    return scale;
+}
+
+void write_scale_min_k4(
+        int index,
+        uint8_t *scales,
+        uint8_t scale,
+        uint8_t min) {
+    if (index < 4) {
+        scales[index] = scale;
+        scales[index + 4] = min;
+    } else {
+        scales[index + 4] = static_cast<uint8_t>((scale & 0x0FU) | ((min & 0x0FU) << 4));
+        scales[index - 4] = static_cast<uint8_t>(scales[index - 4] | ((scale >> 4) << 6));
+        scales[index] = static_cast<uint8_t>(scales[index] | ((min >> 4) << 6));
+    }
+}
+
+void read_scale_min_k4(
+        int index,
+        const uint8_t *scales,
+        uint8_t *scale,
+        uint8_t *min) {
+    if (index < 4) {
+        *scale = scales[index] & 0x3FU;
+        *min = scales[index + 4] & 0x3FU;
+    } else {
+        *scale = static_cast<uint8_t>((scales[index + 4] & 0x0FU) | ((scales[index - 4] >> 6) << 4));
+        *min = static_cast<uint8_t>((scales[index + 4] >> 4) | ((scales[index] >> 6) << 4));
+    }
+}
+
 void quantize_q6_k_block(const float *values, char *encoded) {
     int8_t levels[kQkK] = {};
     float scales[kQkK / 16] = {};
@@ -484,6 +606,105 @@ void quantize_q6_k_block(const float *values, char *encoded) {
         }
         ql += 64;
         qh += 32;
+    }
+}
+
+void quantize_q5_k_block(const float *values, char *encoded) {
+    uint8_t levels[kQkK] = {};
+    float mins[kQkK / 32] = {};
+    float scales[kQkK / 32] = {};
+    float weights[32] = {};
+    uint8_t scratch[32] = {};
+
+    float max_scale = 0.0f;
+    float max_min = 0.0f;
+    for (int block = 0; block < kQkK / 32; ++block) {
+        float sum_x2 = 0.0f;
+        for (int index = 0; index < 32; ++index) {
+            const float value = values[32 * block + index];
+            sum_x2 += value * value;
+        }
+        const float average_abs = std::sqrt(sum_x2 / 32.0f);
+        for (int index = 0; index < 32; ++index) {
+            weights[index] = average_abs + std::fabs(values[32 * block + index]);
+        }
+
+        scales[block] = make_qkx2_quants(
+                32,
+                31,
+                values + 32 * block,
+                weights,
+                levels + 32 * block,
+                &mins[block],
+                scratch,
+                -0.5f,
+                0.1f,
+                15,
+                false);
+        if (scales[block] > max_scale) {
+            max_scale = scales[block];
+        }
+        if (mins[block] > max_min) {
+            max_min = mins[block];
+        }
+    }
+
+    std::memset(encoded, 0, 176);
+    uint8_t *packed_scales = reinterpret_cast<uint8_t *>(encoded + 4);
+    uint8_t *qh = reinterpret_cast<uint8_t *>(encoded + 16);
+    uint8_t *ql = reinterpret_cast<uint8_t *>(encoded + 48);
+
+    const float inv_scale = max_scale > 0.0f ? 63.0f / max_scale : 0.0f;
+    const float inv_min = max_min > 0.0f ? 63.0f / max_min : 0.0f;
+    for (int block = 0; block < kQkK / 32; ++block) {
+        const uint8_t scale = static_cast<uint8_t>(clamp_int(nearest_int(inv_scale * scales[block]), 0, 63));
+        const uint8_t min = static_cast<uint8_t>(clamp_int(nearest_int(inv_min * mins[block]), 0, 63));
+        write_scale_min_k4(block, packed_scales, scale, min);
+    }
+
+    const uint16_t d = float32_bits_to_float16(float32_to_bits(max_scale / 63.0f));
+    const uint16_t dmin = float32_bits_to_float16(float32_to_bits(max_min / 63.0f));
+    encoded[0] = static_cast<char>(d & 0xFFU);
+    encoded[1] = static_cast<char>((d >> 8) & 0xFFU);
+    encoded[2] = static_cast<char>(dmin & 0xFFU);
+    encoded[3] = static_cast<char>((dmin >> 8) & 0xFFU);
+
+    const float super_scale = float16_bits_to_float32(d);
+    const float super_min = float16_bits_to_float32(dmin);
+    for (int block = 0; block < kQkK / 32; ++block) {
+        uint8_t scale = 0;
+        uint8_t min = 0;
+        read_scale_min_k4(block, packed_scales, &scale, &min);
+        const float local_scale = super_scale * static_cast<float>(scale);
+        if (local_scale == 0.0f) {
+            continue;
+        }
+        const float local_min = super_min * static_cast<float>(min);
+        for (int index = 0; index < 32; ++index) {
+            const int level = clamp_int(nearest_int((values[32 * block + index] + local_min) / local_scale), 0, 31);
+            levels[32 * block + index] = static_cast<uint8_t>(level);
+        }
+    }
+
+    uint8_t mask_low = 1;
+    uint8_t mask_high = 2;
+    for (int base = 0; base < kQkK; base += 64) {
+        for (int offset = 0; offset < 32; ++offset) {
+            int low = levels[base + offset];
+            if (low > 15) {
+                low -= 16;
+                qh[offset] = static_cast<uint8_t>(qh[offset] | mask_low);
+            }
+            int high = levels[base + offset + 32];
+            if (high > 15) {
+                high -= 16;
+                qh[offset] = static_cast<uint8_t>(qh[offset] | mask_high);
+            }
+            ql[offset] = static_cast<uint8_t>(low | (high << 4));
+        }
+        mask_low = static_cast<uint8_t>(mask_low << 2);
+        mask_high = static_cast<uint8_t>(mask_high << 2);
+        ql += 32;
     }
 }
 
@@ -664,6 +885,53 @@ bool quantize_range_to_q6_k(
     return true;
 }
 
+bool quantize_range_to_q5_k(
+        const HorizonGgufTensorSource &tensor,
+        std::ofstream &output,
+        std::string &error) {
+    const uint64_t source_stride = tensor.source_encoding == HorizonTensorEncoding::F32 ? 4 : 2;
+    const uint64_t element_count = tensor.source_data_size / source_stride;
+    if (tensor.source_data_size % source_stride != 0 || element_count % kQkK != 0) {
+        error = "Tensor " + tensor.name + " cannot be Q5_K quantized because its element count is not a multiple of 256.";
+        return false;
+    }
+
+    std::ifstream input(tensor.source_path, std::ios::binary);
+    if (!input) {
+        error = "Unable to open tensor source " + tensor.source_path + ".";
+        return false;
+    }
+    input.seekg(static_cast<std::streamoff>(tensor.source_offset), std::ios::beg);
+    if (!input) {
+        error = "Unable to seek tensor source " + tensor.source_path + ".";
+        return false;
+    }
+
+    std::vector<char> source_block(static_cast<size_t>(source_stride * kQkK));
+    std::vector<float> values(kQkK);
+    char encoded[176] = {};
+    for (uint64_t block = 0; block < element_count / kQkK; ++block) {
+        input.read(source_block.data(), static_cast<std::streamsize>(source_block.size()));
+        if (static_cast<size_t>(input.gcount()) != source_block.size()) {
+            error = "Unable to read tensor data for " + tensor.name + ".";
+            return false;
+        }
+
+        for (int index = 0; index < kQkK; ++index) {
+            values[index] = read_source_float(source_block.data() + index * source_stride, tensor.source_encoding);
+        }
+        quantize_q5_k_block(values.data(), encoded);
+
+        output.write(encoded, sizeof(encoded));
+        if (!output) {
+            error = "Unable to write Q5_K tensor data for " + tensor.name + ".";
+            return false;
+        }
+    }
+
+    return true;
+}
+
 bool write_tensor_data(
         const HorizonGgufTensorSource &tensor,
         std::ofstream &output,
@@ -683,6 +951,9 @@ bool write_tensor_data(
     }
     if (tensor.output_encoding == HorizonTensorOutputEncoding::Q6_K) {
         return quantize_range_to_q6_k(tensor, output, error);
+    }
+    if (tensor.output_encoding == HorizonTensorOutputEncoding::Q5_K) {
+        return quantize_range_to_q5_k(tensor, output, error);
     }
     if (tensor.source_encoding == HorizonTensorEncoding::F16) {
         return copy_range(tensor, output, error);
