@@ -128,6 +128,82 @@ std::string unescape_json_string(const std::string &value) {
     return output;
 }
 
+std::vector<uint32_t> utf8_codepoints(const std::string &value) {
+    std::vector<uint32_t> codepoints;
+    size_t cursor = 0;
+    while (cursor < value.size()) {
+        const uint8_t lead = static_cast<uint8_t>(value[cursor]);
+        if (lead < 0x80) {
+            codepoints.push_back(lead);
+            cursor += 1;
+        } else if ((lead & 0xE0U) == 0xC0U && cursor + 1 < value.size()) {
+            codepoints.push_back(((lead & 0x1FU) << 6U) |
+                                 (static_cast<uint8_t>(value[cursor + 1]) & 0x3FU));
+            cursor += 2;
+        } else if ((lead & 0xF0U) == 0xE0U && cursor + 2 < value.size()) {
+            codepoints.push_back(((lead & 0x0FU) << 12U) |
+                                 ((static_cast<uint8_t>(value[cursor + 1]) & 0x3FU) << 6U) |
+                                 (static_cast<uint8_t>(value[cursor + 2]) & 0x3FU));
+            cursor += 3;
+        } else if ((lead & 0xF8U) == 0xF0U && cursor + 3 < value.size()) {
+            codepoints.push_back(((lead & 0x07U) << 18U) |
+                                 ((static_cast<uint8_t>(value[cursor + 1]) & 0x3FU) << 12U) |
+                                 ((static_cast<uint8_t>(value[cursor + 2]) & 0x3FU) << 6U) |
+                                 (static_cast<uint8_t>(value[cursor + 3]) & 0x3FU));
+            cursor += 4;
+        } else {
+            codepoints.push_back(lead);
+            cursor += 1;
+        }
+    }
+    return codepoints;
+}
+
+std::map<uint32_t, uint8_t> gpt2_byte_decoder() {
+    std::map<uint32_t, uint8_t> decoder;
+    std::vector<uint32_t> bytes;
+    for (uint32_t value = static_cast<uint32_t>('!'); value <= static_cast<uint32_t>('~'); ++value) {
+        bytes.push_back(value);
+    }
+    for (uint32_t value = 0xA1U; value <= 0xACU; ++value) {
+        bytes.push_back(value);
+    }
+    for (uint32_t value = 0xAEU; value <= 0xFFU; ++value) {
+        bytes.push_back(value);
+    }
+
+    std::vector<uint32_t> chars = bytes;
+    uint32_t extra = 0;
+    for (uint32_t value = 0; value < 256U; ++value) {
+        if (std::find(bytes.begin(), bytes.end(), value) == bytes.end()) {
+            bytes.push_back(value);
+            chars.push_back(256U + extra);
+            extra += 1;
+        }
+    }
+
+    for (size_t index = 0; index < bytes.size(); ++index) {
+        decoder[chars[index]] = static_cast<uint8_t>(bytes[index]);
+    }
+    return decoder;
+}
+
+std::string decode_gpt2_token_bytes(const std::string &token) {
+    static const std::map<uint32_t, uint8_t> decoder = gpt2_byte_decoder();
+    std::string output;
+    for (uint32_t codepoint : utf8_codepoints(token)) {
+        const auto mapped = decoder.find(codepoint);
+        if (mapped != decoder.end()) {
+            output.push_back(static_cast<char>(mapped->second));
+        } else if (codepoint < 0x80U) {
+            output.push_back(static_cast<char>(codepoint));
+        } else {
+            return token;
+        }
+    }
+    return output;
+}
+
 std::string extract_object_string(const std::string &object_json, const std::string &key) {
     return extract_json_string(object_json, key);
 }
@@ -250,6 +326,54 @@ std::string map_llama_tensor_name(const std::string &source_name) {
     return "";
 }
 
+std::string map_qwen_tensor_name(const std::string &source_name) {
+    const std::string mapped = map_llama_tensor_name(source_name);
+    if (!mapped.empty()) {
+        return mapped;
+    }
+
+    const std::string prefix = "model.layers.";
+    if (source_name.rfind(prefix, 0) != 0) {
+        return "";
+    }
+
+    const size_t layer_start = prefix.size();
+    const size_t layer_end = source_name.find('.', layer_start);
+    if (layer_end == std::string::npos) {
+        return "";
+    }
+    const std::string layer = source_name.substr(layer_start, layer_end - layer_start);
+    const std::string rest = source_name.substr(layer_end + 1);
+
+    if (rest == "self_attn.q_norm.weight") {
+        return "blk." + layer + ".attn_q_norm.weight";
+    }
+    if (rest == "self_attn.k_norm.weight") {
+        return "blk." + layer + ".attn_k_norm.weight";
+    }
+    if (rest == "self_attn.q_proj.bias") {
+        return "blk." + layer + ".attn_q.bias";
+    }
+    if (rest == "self_attn.k_proj.bias") {
+        return "blk." + layer + ".attn_k.bias";
+    }
+    if (rest == "self_attn.v_proj.bias") {
+        return "blk." + layer + ".attn_v.bias";
+    }
+    if (rest == "self_attn.o_proj.bias") {
+        return "blk." + layer + ".attn_output.bias";
+    }
+
+    return "";
+}
+
+std::string map_tensor_name(const std::string &source_name, const std::string &model_family) {
+    if (model_family == "QWEN") {
+        return map_qwen_tensor_name(source_name);
+    }
+    return map_llama_tensor_name(source_name);
+}
+
 HorizonTensorEncoding tensor_encoding_for_dtype(const std::string &dtype) {
     if (dtype == "F16") {
         return HorizonTensorEncoding::F16;
@@ -292,9 +416,19 @@ uint64_t safetensors_dtype_bytes(const std::string &dtype) {
 }
 
 bool is_supported_native_output_quantization(const std::string &quantization) {
-    return quantization == "F16" || quantization == "Q8_0" || quantization == "Q6_K" ||
+    return quantization == "F16" || quantization == "Q8_0" || quantization == "Q4_0" ||
+           quantization == "Q5_0" || quantization == "Q6_K" ||
            quantization == "Q5_K_M" || quantization == "Q4_K_M" || quantization == "Q4_K_S" ||
            quantization == "Q3_K_M";
+}
+
+bool is_supported_family_quantization(
+        const std::string &model_family,
+        const std::string &quantization) {
+    if ((quantization == "Q4_0" || quantization == "Q5_0") && model_family != "QWEN") {
+        return false;
+    }
+    return true;
 }
 
 bool should_quantize_tensor_q8_0(
@@ -309,50 +443,89 @@ bool should_quantize_tensor_q8_0(
            element_count % 32 == 0;
 }
 
-bool should_quantize_tensor_q6_k(
+bool should_quantize_tensor_q5_0(
         const SafetensorsTensor &tensor,
-        uint64_t element_count) {
+        uint64_t element_count,
+        const std::string &model_family) {
+    const bool is_llama_permuted_attention =
+            model_family == "LLAMA" &&
+            (tensor.gguf_name.find(".attn_q.weight") != std::string::npos ||
+             tensor.gguf_name.find(".attn_k.weight") != std::string::npos);
     return tensor.shape.size() >= 2 &&
            !tensor.shape.empty() &&
            tensor.gguf_name != "output.weight" &&
-           tensor.gguf_name.find(".attn_q.weight") == std::string::npos &&
-           tensor.gguf_name.find(".attn_k.weight") == std::string::npos &&
+           !is_llama_permuted_attention &&
+           tensor.shape.back() % 32 == 0 &&
+           element_count % 32 == 0;
+}
+
+bool should_quantize_tensor_q4_0(
+        const SafetensorsTensor &tensor,
+        uint64_t element_count,
+        const std::string &model_family) {
+    return should_quantize_tensor_q5_0(tensor, element_count, model_family);
+}
+
+bool should_quantize_tensor_q6_k(
+        const SafetensorsTensor &tensor,
+        uint64_t element_count,
+        const std::string &model_family) {
+    const bool is_llama_permuted_attention =
+            model_family == "LLAMA" &&
+            (tensor.gguf_name.find(".attn_q.weight") != std::string::npos ||
+             tensor.gguf_name.find(".attn_k.weight") != std::string::npos);
+    return tensor.shape.size() >= 2 &&
+           !tensor.shape.empty() &&
+           tensor.gguf_name != "output.weight" &&
+           !is_llama_permuted_attention &&
            tensor.shape.back() % 256 == 0 &&
            element_count % 256 == 0;
 }
 
 bool should_quantize_tensor_q5_k(
         const SafetensorsTensor &tensor,
-        uint64_t element_count) {
+        uint64_t element_count,
+        const std::string &model_family) {
+    const bool is_llama_permuted_attention =
+            model_family == "LLAMA" &&
+            (tensor.gguf_name.find(".attn_q.weight") != std::string::npos ||
+             tensor.gguf_name.find(".attn_k.weight") != std::string::npos);
     return tensor.shape.size() >= 2 &&
            !tensor.shape.empty() &&
            tensor.gguf_name != "output.weight" &&
-           tensor.gguf_name.find(".attn_q.weight") == std::string::npos &&
-           tensor.gguf_name.find(".attn_k.weight") == std::string::npos &&
+           !is_llama_permuted_attention &&
            tensor.shape.back() % 256 == 0 &&
            element_count % 256 == 0;
 }
 
 bool should_quantize_tensor_q4_k(
         const SafetensorsTensor &tensor,
-        uint64_t element_count) {
+        uint64_t element_count,
+        const std::string &model_family) {
+    const bool is_llama_permuted_attention =
+            model_family == "LLAMA" &&
+            (tensor.gguf_name.find(".attn_q.weight") != std::string::npos ||
+             tensor.gguf_name.find(".attn_k.weight") != std::string::npos);
     return tensor.shape.size() >= 2 &&
            !tensor.shape.empty() &&
            tensor.gguf_name != "output.weight" &&
-           tensor.gguf_name.find(".attn_q.weight") == std::string::npos &&
-           tensor.gguf_name.find(".attn_k.weight") == std::string::npos &&
+           !is_llama_permuted_attention &&
            tensor.shape.back() % 256 == 0 &&
            element_count % 256 == 0;
 }
 
 bool should_quantize_tensor_q3_k(
         const SafetensorsTensor &tensor,
-        uint64_t element_count) {
+        uint64_t element_count,
+        const std::string &model_family) {
+    const bool is_llama_permuted_attention =
+            model_family == "LLAMA" &&
+            (tensor.gguf_name.find(".attn_q.weight") != std::string::npos ||
+             tensor.gguf_name.find(".attn_k.weight") != std::string::npos);
     return tensor.shape.size() >= 2 &&
            !tensor.shape.empty() &&
            tensor.gguf_name != "output.weight" &&
-           tensor.gguf_name.find(".attn_q.weight") == std::string::npos &&
-           tensor.gguf_name.find(".attn_k.weight") == std::string::npos &&
+           !is_llama_permuted_attention &&
            tensor.shape.back() % 256 == 0 &&
            element_count % 256 == 0;
 }
@@ -364,7 +537,11 @@ bool should_keep_tensor_f32(const SafetensorsTensor &tensor) {
 uint32_t row_permutation_heads_for_tensor(
         const SafetensorsTensor &tensor,
         uint32_t attention_head_count,
-        uint32_t key_value_head_count) {
+        uint32_t key_value_head_count,
+        const std::string &model_family) {
+    if (model_family != "LLAMA") {
+        return 0;
+    }
     if (tensor.shape.size() != 2) {
         return 0;
     }
@@ -380,26 +557,47 @@ uint32_t row_permutation_heads_for_tensor(
 uint32_t output_ggml_type_for_tensor(
         const std::string &quantization,
         const SafetensorsTensor &tensor,
-        uint64_t element_count) {
+        uint64_t element_count,
+        const std::string &model_family) {
     if (should_keep_tensor_f32(tensor)) {
         return 0;
     }
     if (quantization == "Q8_0" && should_quantize_tensor_q8_0(tensor, element_count)) {
         return 8;
     }
-    if (quantization == "Q6_K" && should_quantize_tensor_q6_k(tensor, element_count)) {
+    if (quantization == "Q5_0" && should_quantize_tensor_q5_0(tensor, element_count, model_family)) {
+        return 6;
+    }
+    if (quantization == "Q4_0" && should_quantize_tensor_q4_0(tensor, element_count, model_family)) {
+        return 2;
+    }
+    if (quantization == "Q6_K" && should_quantize_tensor_q6_k(tensor, element_count, model_family)) {
         return 14;
     }
+    if (quantization == "Q6_K" && should_quantize_tensor_q8_0(tensor, element_count)) {
+        return 8;
+    }
     if ((quantization == "Q5_K_M" || quantization == "Q5_K_S") &&
-            should_quantize_tensor_q5_k(tensor, element_count)) {
+            should_quantize_tensor_q5_k(tensor, element_count, model_family)) {
         return 13;
     }
+    if (quantization == "Q5_K_M" && should_quantize_tensor_q8_0(tensor, element_count)) {
+        return 8;
+    }
     if ((quantization == "Q4_K_M" || quantization == "Q4_K_S") &&
-            should_quantize_tensor_q4_k(tensor, element_count)) {
+            should_quantize_tensor_q4_k(tensor, element_count, model_family)) {
         return 12;
     }
-    if (quantization == "Q3_K_M" && should_quantize_tensor_q3_k(tensor, element_count)) {
+    if ((quantization == "Q4_K_M" || quantization == "Q4_K_S") &&
+            should_quantize_tensor_q5_0(tensor, element_count, model_family)) {
+        return 6;
+    }
+    if (quantization == "Q3_K_M" && should_quantize_tensor_q3_k(tensor, element_count, model_family)) {
         return 11;
+    }
+    if (quantization == "Q3_K_M" && model_family == "QWEN" &&
+            should_quantize_tensor_q4_0(tensor, element_count, model_family)) {
+        return 2;
     }
     return 1;
 }
@@ -407,26 +605,47 @@ uint32_t output_ggml_type_for_tensor(
 HorizonTensorOutputEncoding output_encoding_for_tensor(
         const std::string &quantization,
         const SafetensorsTensor &tensor,
-        uint64_t element_count) {
+        uint64_t element_count,
+        const std::string &model_family) {
     if (should_keep_tensor_f32(tensor)) {
         return HorizonTensorOutputEncoding::F32;
     }
     if (quantization == "Q8_0" && should_quantize_tensor_q8_0(tensor, element_count)) {
         return HorizonTensorOutputEncoding::Q8_0;
     }
-    if (quantization == "Q6_K" && should_quantize_tensor_q6_k(tensor, element_count)) {
+    if (quantization == "Q5_0" && should_quantize_tensor_q5_0(tensor, element_count, model_family)) {
+        return HorizonTensorOutputEncoding::Q5_0;
+    }
+    if (quantization == "Q4_0" && should_quantize_tensor_q4_0(tensor, element_count, model_family)) {
+        return HorizonTensorOutputEncoding::Q4_0;
+    }
+    if (quantization == "Q6_K" && should_quantize_tensor_q6_k(tensor, element_count, model_family)) {
         return HorizonTensorOutputEncoding::Q6_K;
     }
+    if (quantization == "Q6_K" && should_quantize_tensor_q8_0(tensor, element_count)) {
+        return HorizonTensorOutputEncoding::Q8_0;
+    }
     if ((quantization == "Q5_K_M" || quantization == "Q5_K_S") &&
-            should_quantize_tensor_q5_k(tensor, element_count)) {
+            should_quantize_tensor_q5_k(tensor, element_count, model_family)) {
         return HorizonTensorOutputEncoding::Q5_K;
     }
+    if (quantization == "Q5_K_M" && should_quantize_tensor_q8_0(tensor, element_count)) {
+        return HorizonTensorOutputEncoding::Q8_0;
+    }
     if ((quantization == "Q4_K_M" || quantization == "Q4_K_S") &&
-            should_quantize_tensor_q4_k(tensor, element_count)) {
+            should_quantize_tensor_q4_k(tensor, element_count, model_family)) {
         return HorizonTensorOutputEncoding::Q4_K;
     }
-    if (quantization == "Q3_K_M" && should_quantize_tensor_q3_k(tensor, element_count)) {
+    if ((quantization == "Q4_K_M" || quantization == "Q4_K_S") &&
+            should_quantize_tensor_q5_0(tensor, element_count, model_family)) {
+        return HorizonTensorOutputEncoding::Q5_0;
+    }
+    if (quantization == "Q3_K_M" && should_quantize_tensor_q3_k(tensor, element_count, model_family)) {
         return HorizonTensorOutputEncoding::Q3_K;
+    }
+    if (quantization == "Q3_K_M" && model_family == "QWEN" &&
+            should_quantize_tensor_q4_0(tensor, element_count, model_family)) {
+        return HorizonTensorOutputEncoding::Q4_0;
     }
     return HorizonTensorOutputEncoding::F16;
 }
@@ -434,26 +653,47 @@ HorizonTensorOutputEncoding output_encoding_for_tensor(
 uint64_t output_data_size_for_tensor(
         const std::string &quantization,
         const SafetensorsTensor &tensor,
-        uint64_t element_count) {
+        uint64_t element_count,
+        const std::string &model_family) {
     if (should_keep_tensor_f32(tensor)) {
         return element_count * 4;
     }
     if (quantization == "Q8_0" && should_quantize_tensor_q8_0(tensor, element_count)) {
         return (element_count / 32) * 34;
     }
-    if (quantization == "Q6_K" && should_quantize_tensor_q6_k(tensor, element_count)) {
+    if (quantization == "Q5_0" && should_quantize_tensor_q5_0(tensor, element_count, model_family)) {
+        return (element_count / 32) * 22;
+    }
+    if (quantization == "Q4_0" && should_quantize_tensor_q4_0(tensor, element_count, model_family)) {
+        return (element_count / 32) * 18;
+    }
+    if (quantization == "Q6_K" && should_quantize_tensor_q6_k(tensor, element_count, model_family)) {
         return (element_count / 256) * 210;
     }
+    if (quantization == "Q6_K" && should_quantize_tensor_q8_0(tensor, element_count)) {
+        return (element_count / 32) * 34;
+    }
     if ((quantization == "Q5_K_M" || quantization == "Q5_K_S") &&
-            should_quantize_tensor_q5_k(tensor, element_count)) {
+            should_quantize_tensor_q5_k(tensor, element_count, model_family)) {
         return (element_count / 256) * 176;
     }
+    if (quantization == "Q5_K_M" && should_quantize_tensor_q8_0(tensor, element_count)) {
+        return (element_count / 32) * 34;
+    }
     if ((quantization == "Q4_K_M" || quantization == "Q4_K_S") &&
-            should_quantize_tensor_q4_k(tensor, element_count)) {
+            should_quantize_tensor_q4_k(tensor, element_count, model_family)) {
         return (element_count / 256) * 144;
     }
-    if (quantization == "Q3_K_M" && should_quantize_tensor_q3_k(tensor, element_count)) {
+    if ((quantization == "Q4_K_M" || quantization == "Q4_K_S") &&
+            should_quantize_tensor_q5_0(tensor, element_count, model_family)) {
+        return (element_count / 32) * 22;
+    }
+    if (quantization == "Q3_K_M" && should_quantize_tensor_q3_k(tensor, element_count, model_family)) {
         return (element_count / 256) * 110;
+    }
+    if (quantization == "Q3_K_M" && model_family == "QWEN" &&
+            should_quantize_tensor_q4_0(tensor, element_count, model_family)) {
+        return (element_count / 32) * 18;
     }
     return element_count * 2;
 }
@@ -461,7 +701,8 @@ uint64_t output_data_size_for_tensor(
 std::vector<SafetensorsTensor> parse_safetensors_tensors(
         const std::string &header,
         const WorkspaceFile &source_file,
-        uint64_t header_length) {
+        uint64_t header_length,
+        const std::string &model_family) {
     std::vector<SafetensorsTensor> tensors;
     size_t cursor = 0;
     while (cursor < header.size()) {
@@ -500,7 +741,7 @@ std::vector<SafetensorsTensor> parse_safetensors_tensors(
         if (object_json.find("\"data_offsets\"") != std::string::npos && offsets.size() == 2) {
             SafetensorsTensor tensor {
                     name,
-                    map_llama_tensor_name(name),
+                    map_tensor_name(name, model_family),
                     extract_object_string(object_json, "dtype"),
                     extract_uint_array(object_json, "shape"),
                     source_file.path,
@@ -652,6 +893,37 @@ std::vector<std::string> extract_tokenizer_json_vocab(const std::string &tokeniz
         cursor = id_end + 1;
     }
 
+    const std::string added_key = "\"added_tokens\"";
+    key_pos = tokenizer_json.find(added_key);
+    if (key_pos != std::string::npos) {
+        size_t array_start = tokenizer_json.find('[', key_pos + added_key.size());
+        size_t added_cursor = array_start == std::string::npos ? std::string::npos : array_start + 1;
+        while (added_cursor != std::string::npos && added_cursor < tokenizer_json.size()) {
+            size_t array_end = tokenizer_json.find(']', added_cursor);
+            size_t added_object_start = tokenizer_json.find('{', added_cursor);
+            if (array_end != std::string::npos &&
+                (added_object_start == std::string::npos || array_end < added_object_start)) {
+                break;
+            }
+            if (added_object_start == std::string::npos) {
+                break;
+            }
+            size_t added_object_end = find_matching_brace(tokenizer_json, added_object_start);
+            if (added_object_end == std::string::npos) {
+                break;
+            }
+
+            const std::string added_object =
+                    tokenizer_json.substr(added_object_start, added_object_end - added_object_start + 1);
+            const uint32_t token_id = extract_json_uint32(added_object, "id", UINT32_MAX);
+            const std::string token_content = extract_json_string(added_object, "content");
+            if (token_id != UINT32_MAX && !token_content.empty()) {
+                id_to_token[token_id] = token_content;
+            }
+            added_cursor = added_object_end + 1;
+        }
+    }
+
     if (id_to_token.empty()) {
         return {};
     }
@@ -661,6 +933,19 @@ std::vector<std::string> extract_tokenizer_json_vocab(const std::string &tokeniz
         tokens[entry.first] = entry.second;
     }
     return tokens;
+}
+
+void normalize_qwen_tokens(
+        std::vector<std::string> &tokens,
+        uint32_t config_vocab_size) {
+    if (config_vocab_size > tokens.size()) {
+        tokens.resize(config_vocab_size);
+    }
+    for (size_t index = 0; index < tokens.size(); ++index) {
+        if (tokens[index].empty()) {
+            tokens[index] = "[PAD" + std::to_string(index) + "]";
+        }
+    }
 }
 
 std::string extract_tokenizer_json_model_type(const std::string &tokenizer_json) {
@@ -743,6 +1028,83 @@ bool object_json_has_true(const std::string &object_json, const std::string &key
     return object_json.compare(cursor, 4, "true") == 0;
 }
 
+std::map<uint32_t, bool> extract_added_token_special_map(const std::string &tokenizer_json) {
+    std::map<uint32_t, bool> added_tokens;
+    const std::string added_key = "\"added_tokens\"";
+    size_t key_pos = tokenizer_json.find(added_key);
+    if (key_pos == std::string::npos) {
+        return added_tokens;
+    }
+    size_t array_start = tokenizer_json.find('[', key_pos + added_key.size());
+    if (array_start == std::string::npos) {
+        return added_tokens;
+    }
+
+    size_t cursor = array_start + 1;
+    while (cursor < tokenizer_json.size()) {
+        size_t array_end = tokenizer_json.find(']', cursor);
+        size_t object_start = tokenizer_json.find('{', cursor);
+        if (array_end != std::string::npos && (object_start == std::string::npos || array_end < object_start)) {
+            break;
+        }
+        if (object_start == std::string::npos) {
+            break;
+        }
+        size_t object_end = find_matching_brace(tokenizer_json, object_start);
+        if (object_end == std::string::npos) {
+            break;
+        }
+
+        const std::string object_json = tokenizer_json.substr(object_start, object_end - object_start + 1);
+        const uint32_t token_id = extract_json_uint32(object_json, "id", UINT32_MAX);
+        if (token_id != UINT32_MAX) {
+            added_tokens[token_id] = object_json_has_true(object_json, "special");
+        }
+        cursor = object_end + 1;
+    }
+
+    return added_tokens;
+}
+
+uint32_t token_id_for_content(
+        const std::string &tokenizer_json,
+        const std::string &content,
+        uint32_t fallback) {
+    const std::string added_key = "\"added_tokens\"";
+    size_t key_pos = tokenizer_json.find(added_key);
+    if (key_pos == std::string::npos) {
+        return fallback;
+    }
+    size_t array_start = tokenizer_json.find('[', key_pos + added_key.size());
+    if (array_start == std::string::npos) {
+        return fallback;
+    }
+
+    size_t cursor = array_start + 1;
+    while (cursor < tokenizer_json.size()) {
+        size_t array_end = tokenizer_json.find(']', cursor);
+        size_t object_start = tokenizer_json.find('{', cursor);
+        if (array_end != std::string::npos && (object_start == std::string::npos || array_end < object_start)) {
+            break;
+        }
+        if (object_start == std::string::npos) {
+            break;
+        }
+        size_t object_end = find_matching_brace(tokenizer_json, object_start);
+        if (object_end == std::string::npos) {
+            break;
+        }
+
+        const std::string object_json = tokenizer_json.substr(object_start, object_end - object_start + 1);
+        if (extract_json_string(object_json, "content") == content) {
+            return extract_json_uint32(object_json, "id", fallback);
+        }
+        cursor = object_end + 1;
+    }
+
+    return fallback;
+}
+
 std::vector<int32_t> build_token_types(const std::string &tokenizer_json, size_t token_count) {
     constexpr int32_t kNormalToken = 1;
     constexpr int32_t kControlToken = 3;
@@ -786,9 +1148,25 @@ std::vector<int32_t> build_token_types(const std::string &tokenizer_json, size_t
 
 std::vector<int32_t> build_token_types(
         const std::string &tokenizer_json,
-        const std::vector<std::string> &tokens) {
+        const std::vector<std::string> &tokens,
+        const std::string &model_family) {
     std::vector<int32_t> token_types = build_token_types(tokenizer_json, tokens.size());
     constexpr int32_t kByteToken = 6;
+    constexpr int32_t kControlToken = 3;
+    constexpr int32_t kUserDefinedToken = 4;
+    constexpr int32_t kUnusedToken = 5;
+
+    if (model_family == "QWEN") {
+        const std::map<uint32_t, bool> added_tokens = extract_added_token_special_map(tokenizer_json);
+        for (size_t index = 0; index < tokens.size(); ++index) {
+            const auto added = added_tokens.find(static_cast<uint32_t>(index));
+            if (added != added_tokens.end()) {
+                token_types[index] = added->second ? kControlToken : kUserDefinedToken;
+            } else if (tokens[index].rfind("[PAD", 0) == 0 || tokens[index].rfind("[unused", 0) == 0) {
+                token_types[index] = kUnusedToken;
+            }
+        }
+    }
 
     for (size_t index = 0; index < tokens.size(); ++index) {
         const std::string &token = tokens[index];
@@ -807,10 +1185,14 @@ std::vector<int32_t> build_token_types(
 }
 
 std::string tokenizer_pre_for_model(
+        const std::string &model_family,
         const std::string &tokenizer_model,
         uint32_t vocab_size) {
     if (tokenizer_model != "gpt2") {
         return "default";
+    }
+    if (model_family == "QWEN") {
+        return "qwen2";
     }
     if (vocab_size == 49152) {
         return "smollm";
@@ -818,15 +1200,29 @@ std::string tokenizer_pre_for_model(
     return "default";
 }
 
-bool should_add_bos_token(uint32_t vocab_size) {
+bool should_add_bos_token(
+        const std::string &model_family,
+        uint32_t vocab_size) {
+    if (model_family == "QWEN") {
+        return false;
+    }
     return vocab_size != 49152;
 }
 
-std::string gguf_architecture_name(const std::string &architecture, const std::string &model_type) {
+std::string gguf_architecture_name(
+        const std::string &architecture,
+        const std::string &model_type,
+        const std::string &model_family) {
     std::string source = !model_type.empty() ? model_type : architecture;
     std::transform(source.begin(), source.end(), source.begin(), [](char value) {
         return std::tolower(static_cast<unsigned char>(value));
     });
+    if (model_family == "QWEN") {
+        if (source.find("qwen3") != std::string::npos) {
+            return "qwen3";
+        }
+        return "qwen2";
+    }
     if (source.find("mistral") != std::string::npos) {
         return "llama";
     }
@@ -842,6 +1238,12 @@ uint32_t gguf_file_type(const std::string &quantization) {
     }
     if (quantization == "Q8_0") {
         return 7;
+    }
+    if (quantization == "Q4_0") {
+        return 2;
+    }
+    if (quantization == "Q5_0") {
+        return 8;
     }
     if (quantization == "Q4_K_S") {
         return 14;
@@ -864,17 +1266,19 @@ uint32_t gguf_file_type(const std::string &quantization) {
     return 0;
 }
 
-HorizonGgufMetadataWriter build_llama_metadata_writer(
+HorizonGgufMetadataWriter build_metadata_writer(
         const std::string &config_json,
+        const std::string &tokenizer_json,
         const std::vector<std::string> &tokens,
         const std::string &tokenizer_model,
         const std::vector<std::string> &merges,
         const std::vector<int32_t> &token_types,
         const std::string &architecture,
         const std::string &model_type,
-        const std::string &quantization) {
+        const std::string &quantization,
+        const std::string &model_family) {
     HorizonGgufMetadataWriter writer;
-    const std::string gguf_arch = gguf_architecture_name(architecture, model_type);
+    const std::string gguf_arch = gguf_architecture_name(architecture, model_type, model_family);
 
     writer.add_string("general.architecture", gguf_arch.empty() ? "llama" : gguf_arch);
     writer.add_string("general.name", "HorizonAssimilator converted model");
@@ -898,17 +1302,27 @@ HorizonGgufMetadataWriter build_llama_metadata_writer(
             prefix + ".attention.layer_norm_rms_epsilon",
             extract_json_float(config_json, "rms_norm_eps", 0.00001f));
     writer.add_string("tokenizer.ggml.model", tokenizer_model);
-    writer.add_string("tokenizer.ggml.pre", tokenizer_pre_for_model(tokenizer_model, vocab_size));
+    writer.add_string("tokenizer.ggml.pre", tokenizer_pre_for_model(model_family, tokenizer_model, vocab_size));
     writer.add_string_array("tokenizer.ggml.tokens", tokens);
     writer.add_float32_array("tokenizer.ggml.scores", std::vector<float>(tokens.size(), 0.0f));
     writer.add_int32_array("tokenizer.ggml.token_type", token_types);
     if (!merges.empty()) {
         writer.add_string_array("tokenizer.ggml.merges", merges);
     }
-    writer.add_uint32("tokenizer.ggml.bos_token_id", extract_json_uint32(config_json, "bos_token_id", 1));
-    writer.add_uint32("tokenizer.ggml.eos_token_id", extract_json_uint32(config_json, "eos_token_id", 2));
-    writer.add_uint32("tokenizer.ggml.unknown_token_id", extract_json_uint32(config_json, "unk_token_id", 0));
-    writer.add_bool("tokenizer.ggml.add_bos_token", should_add_bos_token(vocab_size));
+    if (model_family == "QWEN") {
+        const uint32_t eos_token_id = extract_json_uint32(config_json, "eos_token_id", 151643);
+        writer.add_uint32("tokenizer.ggml.bos_token_id", eos_token_id);
+        writer.add_uint32("tokenizer.ggml.eos_token_id", eos_token_id);
+        writer.add_uint32("tokenizer.ggml.unknown_token_id", eos_token_id);
+        writer.add_uint32(
+                "tokenizer.ggml.eot_token_id",
+                token_id_for_content(tokenizer_json, "<|im_end|>", eos_token_id));
+    } else {
+        writer.add_uint32("tokenizer.ggml.bos_token_id", extract_json_uint32(config_json, "bos_token_id", 1));
+        writer.add_uint32("tokenizer.ggml.eos_token_id", extract_json_uint32(config_json, "eos_token_id", 2));
+        writer.add_uint32("tokenizer.ggml.unknown_token_id", extract_json_uint32(config_json, "unk_token_id", 0));
+    }
+    writer.add_bool("tokenizer.ggml.add_bos_token", should_add_bos_token(model_family, vocab_size));
     writer.add_bool("tokenizer.ggml.add_eos_token", false);
 
     return writer;
@@ -946,7 +1360,9 @@ int count_weight_map_entries(const std::string &index_json) {
     return entries;
 }
 
-SafetensorsHeader read_safetensors_header(const WorkspaceFile &file) {
+SafetensorsHeader read_safetensors_header(
+        const WorkspaceFile &file,
+        const std::string &model_family) {
     if (file.size < 8) {
         return {false, 0, 0, 0, "file is too small for a safetensors header"};
     }
@@ -987,7 +1403,8 @@ SafetensorsHeader read_safetensors_header(const WorkspaceFile &file) {
         return {false, header_length, 0, 0, "header does not look like safetensors JSON"};
     }
 
-    const std::vector<SafetensorsTensor> tensors = parse_safetensors_tensors(header, file, header_length);
+    const std::vector<SafetensorsTensor> tensors =
+            parse_safetensors_tensors(header, file, header_length, model_family);
     int mapped_tensor_count = 0;
     for (const SafetensorsTensor &tensor : tensors) {
         if (!tensor.gguf_name.empty()) {
@@ -1001,7 +1418,8 @@ SafetensorsHeader read_safetensors_header(const WorkspaceFile &file) {
 bool read_safetensors_tensors(
         const WorkspaceFile &file,
         std::vector<SafetensorsTensor> &tensors,
-        std::string &error) {
+        std::string &error,
+        const std::string &model_family) {
     if (file.size < 8) {
         error = file.name + " is too small for a safetensors header.";
         return false;
@@ -1041,7 +1459,8 @@ bool read_safetensors_tensors(
         return false;
     }
 
-    std::vector<SafetensorsTensor> parsed = parse_safetensors_tensors(header, file, header_length);
+    std::vector<SafetensorsTensor> parsed =
+            parse_safetensors_tensors(header, file, header_length, model_family);
     tensors.insert(tensors.end(), parsed.begin(), parsed.end());
     return true;
 }
@@ -1073,12 +1492,28 @@ std::vector<WorkspaceFile> list_workspace_files(const std::string &model_directo
     return files;
 }
 
+bool is_supported_model_family(const std::string &model_family) {
+    return model_family == "LLAMA" || model_family == "QWEN";
+}
+
+std::string model_family_label(const std::string &model_family) {
+    if (model_family == "QWEN") {
+        return "Qwen";
+    }
+    return "LLaMA/Mistral";
+}
+
 }  // namespace
 
 HorizonConversionSummary inspect_hf_safetensors_model(
         const std::string &model_directory,
         const std::string &output_file,
-        const std::string &quantization) {
+        const std::string &quantization,
+        const std::string &model_family) {
+    if (!is_supported_model_family(model_family)) {
+        return {false, "Native GGUF writing currently supports only the LLaMA / Mistral and Qwen model families."};
+    }
+
     const std::vector<WorkspaceFile> files = list_workspace_files(model_directory);
     if (files.empty()) {
         return {false, "Model workspace is empty or cannot be read."};
@@ -1123,7 +1558,7 @@ HorizonConversionSummary inspect_hf_safetensors_model(
     int mapped_tensor_headers = 0;
     for (const WorkspaceFile &file : safetensors_files) {
         source_bytes += file.size;
-        SafetensorsHeader header = read_safetensors_header(file);
+        SafetensorsHeader header = read_safetensors_header(file, model_family);
         if (!header.ok) {
             return {false, file.name + " is not a readable safetensors file: " + header.error + "."};
         }
@@ -1135,11 +1570,14 @@ HorizonConversionSummary inspect_hf_safetensors_model(
     const std::string tokenizer_json = tokenizer_json_path.empty()
             ? std::string()
             : read_text_file(tokenizer_json_path, 128 * 1024 * 1024);
-    const std::vector<std::string> tokens = tokenizer_json_path.empty()
+    std::vector<std::string> tokens = tokenizer_json_path.empty()
             ? std::vector<std::string>()
             : extract_tokenizer_json_vocab(tokenizer_json);
     if (tokens.empty()) {
         return {false, "Native GGUF writing currently requires a tokenizer.json with a readable vocab object."};
+    }
+    if (model_family == "QWEN") {
+        normalize_qwen_tokens(tokens, extract_json_uint32(config_json, "vocab_size", 0));
     }
 
     const std::string tokenizer_json_model_type = extract_tokenizer_json_model_type(tokenizer_json);
@@ -1154,9 +1592,12 @@ HorizonConversionSummary inspect_hf_safetensors_model(
 
     if (!is_supported_native_output_quantization(quantization)) {
         std::ostringstream blocked;
-        blocked << "Native GGUF writing currently supports F16, Q8_0, Q6_K, Q5_K_M, Q4_K_M, Q4_K_S, and Q3_K_M output. Requested " << quantization
+        blocked << "Native GGUF writing currently supports F16, Q8_0, Q4_0, Q5_0, Q6_K, Q5_K_M, Q4_K_M, Q4_K_S, and Q3_K_M output. Requested " << quantization
                 << " still needs native quantization kernels.";
         return {false, blocked.str()};
+    }
+    if (!is_supported_family_quantization(model_family, quantization)) {
+        return {false, quantization + " is currently enabled only for the Qwen model family."};
     }
 
     const std::string architecture = extract_first_architecture(config_json);
@@ -1164,16 +1605,18 @@ HorizonConversionSummary inspect_hf_safetensors_model(
     const uint32_t attention_head_count = extract_json_uint32(config_json, "num_attention_heads", 0);
     const uint32_t key_value_head_count =
             extract_json_uint32(config_json, "num_key_value_heads", attention_head_count);
-    const std::vector<int32_t> token_types = build_token_types(tokenizer_json, tokens);
-    HorizonGgufMetadataWriter metadata_writer = build_llama_metadata_writer(
+    const std::vector<int32_t> token_types = build_token_types(tokenizer_json, tokens, model_family);
+    HorizonGgufMetadataWriter metadata_writer = build_metadata_writer(
             config_json,
+            tokenizer_json,
             tokens,
             gguf_tokenizer_model,
             merges,
             token_types,
             architecture,
             model_type,
-            quantization);
+            quantization,
+            model_family);
     const std::vector<uint8_t> metadata_preview = metadata_writer.build(
             static_cast<uint64_t>(mapped_tensor_headers));
 
@@ -1185,12 +1628,21 @@ HorizonConversionSummary inspect_hf_safetensors_model(
     std::vector<SafetensorsTensor> parsed_tensors;
     for (const WorkspaceFile &file : safetensors_files) {
         std::string parse_error;
-        if (!read_safetensors_tensors(file, parsed_tensors, parse_error)) {
+        if (!read_safetensors_tensors(file, parsed_tensors, parse_error, model_family)) {
             return {false, parse_error};
         }
     }
 
     std::vector<HorizonGgufTensorSource> gguf_tensors;
+    int q6_k_tensor_count = 0;
+    int q5_k_tensor_count = 0;
+    int q4_k_tensor_count = 0;
+    int q3_k_tensor_count = 0;
+    int q8_0_tensor_count = 0;
+    int q4_0_tensor_count = 0;
+    int q5_0_tensor_count = 0;
+    int f16_tensor_count = 0;
+    int f32_tensor_count = 0;
     for (const SafetensorsTensor &tensor : parsed_tensors) {
         if (tensor.gguf_name.empty()) {
             continue;
@@ -1212,24 +1664,49 @@ HorizonConversionSummary inspect_hf_safetensors_model(
             return {false, tensor.source_name + " shape and safetensors byte range do not agree."};
         }
 
-        const uint64_t output_data_size = output_data_size_for_tensor(quantization, tensor, element_count);
+        const uint64_t output_data_size =
+                output_data_size_for_tensor(quantization, tensor, element_count, model_family);
+
+        const uint32_t output_ggml_type =
+                output_ggml_type_for_tensor(quantization, tensor, element_count, model_family);
+        const HorizonTensorOutputEncoding output_encoding =
+                output_encoding_for_tensor(quantization, tensor, element_count, model_family);
+        if (output_encoding == HorizonTensorOutputEncoding::Q6_K) {
+            q6_k_tensor_count += 1;
+        } else if (output_encoding == HorizonTensorOutputEncoding::Q5_K) {
+            q5_k_tensor_count += 1;
+        } else if (output_encoding == HorizonTensorOutputEncoding::Q4_K) {
+            q4_k_tensor_count += 1;
+        } else if (output_encoding == HorizonTensorOutputEncoding::Q3_K) {
+            q3_k_tensor_count += 1;
+        } else if (output_encoding == HorizonTensorOutputEncoding::Q8_0) {
+            q8_0_tensor_count += 1;
+        } else if (output_encoding == HorizonTensorOutputEncoding::Q4_0) {
+            q4_0_tensor_count += 1;
+        } else if (output_encoding == HorizonTensorOutputEncoding::Q5_0) {
+            q5_0_tensor_count += 1;
+        } else if (output_encoding == HorizonTensorOutputEncoding::F32) {
+            f32_tensor_count += 1;
+        } else {
+            f16_tensor_count += 1;
+        }
 
         gguf_tensors.push_back({
                 tensor.gguf_name,
                 tensor.shape,
-                output_ggml_type_for_tensor(quantization, tensor, element_count),
+                output_ggml_type,
                 tensor.source_path,
                 tensor.source_offset,
                 source_bytes,
                 output_data_size,
                 tensor_encoding_for_dtype(tensor.dtype),
-                output_encoding_for_tensor(quantization, tensor, element_count),
-                row_permutation_heads_for_tensor(tensor, attention_head_count, key_value_head_count),
+                output_encoding,
+                row_permutation_heads_for_tensor(tensor, attention_head_count, key_value_head_count, model_family),
         });
     }
 
     if (gguf_tensors.empty()) {
-        return {false, "No mapped LLaMA/Mistral tensors are available for GGUF writing."};
+        return {false, "No mapped " + model_family_label(model_family) + " tensors are available for GGUF writing."};
     }
 
     if (is_supported_native_output_quantization(quantization)) {
@@ -1244,6 +1721,16 @@ HorizonConversionSummary inspect_hf_safetensors_model(
                 << " metadata kv pair(s), " << tokens.size()
                 << " tokenizer token(s), architecture "
                 << (architecture.empty() ? model_type : architecture)
+                << ", family " << model_family_label(model_family)
+                << ", tensor encodings Q6_K=" << q6_k_tensor_count
+                << ", Q5_K=" << q5_k_tensor_count
+                << ", Q4_K=" << q4_k_tensor_count
+                << ", Q3_K=" << q3_k_tensor_count
+                << ", Q8_0=" << q8_0_tensor_count
+                << ", Q4_0=" << q4_0_tensor_count
+                << ", Q5_0=" << q5_0_tensor_count
+                << ", F16=" << f16_tensor_count
+                << ", F32=" << f32_tensor_count
                 << ", output " << output_file << ".";
         return {true, success.str()};
     }
@@ -1251,7 +1738,8 @@ HorizonConversionSummary inspect_hf_safetensors_model(
     std::ostringstream message;
     message << "Native pre-converter inspected " << safetensors_files.size()
             << " safetensors file(s), " << tensor_headers << " tensor header(s), "
-            << mapped_tensor_headers << " LLaMA/Mistral GGUF tensor name mapping(s)";
+            << mapped_tensor_headers << " " << model_family_label(model_family)
+            << " GGUF tensor name mapping(s)";
     if (indexed_tensors > 0) {
         message << ", " << indexed_tensors << " indexed tensor(s)";
     }

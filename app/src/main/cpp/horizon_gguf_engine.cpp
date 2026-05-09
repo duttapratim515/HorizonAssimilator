@@ -13,15 +13,18 @@ Java_com_example_horizonassimilator_conversion_NativeGgufEngine_nativeConvertToG
         jobject,
         jstring model_directory_path,
         jstring output_file_path,
-        jstring quantization_value) {
+        jstring quantization_value,
+        jstring model_family_value) {
     const char *model_directory = env->GetStringUTFChars(model_directory_path, nullptr);
     const char *output_file = env->GetStringUTFChars(output_file_path, nullptr);
     const char *quantization = env->GetStringUTFChars(quantization_value, nullptr);
+    const char *model_family = env->GetStringUTFChars(model_family_value, nullptr);
 
     HorizonConversionSummary result = inspect_hf_safetensors_model(
             model_directory == nullptr ? "" : model_directory,
             output_file == nullptr ? "" : output_file,
-            quantization == nullptr ? "" : quantization);
+            quantization == nullptr ? "" : quantization,
+            model_family == nullptr ? "" : model_family);
     g_last_error = result.message;
 
     if (model_directory != nullptr) {
@@ -32,6 +35,9 @@ Java_com_example_horizonassimilator_conversion_NativeGgufEngine_nativeConvertToG
     }
     if (quantization != nullptr) {
         env->ReleaseStringUTFChars(quantization_value, quantization);
+    }
+    if (model_family != nullptr) {
+        env->ReleaseStringUTFChars(model_family_value, model_family);
     }
 
     return result.ok ? 0 : 1;

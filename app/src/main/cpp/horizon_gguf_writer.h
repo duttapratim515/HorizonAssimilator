@@ -15,6 +15,8 @@ enum class HorizonTensorOutputEncoding {
     F16,
     F32,
     Q8_0,
+    Q4_0,
+    Q5_0,
     Q6_K,
     Q5_K,
     Q4_K,

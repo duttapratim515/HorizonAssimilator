@@ -65,7 +65,8 @@ class AndroidSafetensorsToGgufConverter(
                 request = NativeGgufRequest(
                     modelDirectory = workspace.directory,
                     outputFile = engineOutput,
-                    quantization = request.quantization
+                    quantization = request.quantization,
+                    modelFamily = request.modelFamily
                 ),
                 onProgress = onProgress
             )

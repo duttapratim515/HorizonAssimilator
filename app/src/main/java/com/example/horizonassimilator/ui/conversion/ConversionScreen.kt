@@ -39,12 +39,14 @@ import com.example.horizonassimilator.conversion.ConversionState
 import com.example.horizonassimilator.conversion.ConversionLimits
 import com.example.horizonassimilator.conversion.DeviceCapabilityStatus
 import com.example.horizonassimilator.conversion.GgufQuantization
+import com.example.horizonassimilator.conversion.ModelFamily
 import com.example.horizonassimilator.conversion.ModelDownloader
 import com.example.horizonassimilator.conversion.ModelFile
 import com.example.horizonassimilator.conversion.SafetensorsToGgufConverter
 import com.example.horizonassimilator.conversion.SelectedModel
 import com.example.horizonassimilator.conversion.UrlValidation
 import com.example.horizonassimilator.conversion.buildDeviceCapabilityPreflight
+import com.example.horizonassimilator.conversion.isSupportedFor
 import com.example.horizonassimilator.conversion.toSizeLabel
 import kotlinx.coroutines.launch
 
@@ -64,7 +66,11 @@ fun ConversionScreen(
     var state by remember { mutableStateOf<ConversionState>(ConversionState.Idle) }
     var downloadUrl by remember { mutableStateOf("") }
     var downloadState by remember { mutableStateOf<ModelDownloadState>(ModelDownloadState.Idle) }
+    var selectedModelFamily by remember { mutableStateOf(ModelFamily.LLAMA) }
     var selectedQuantization by remember { mutableStateOf(GgufQuantization.F16) }
+    if (!selectedQuantization.isSupportedFor(selectedModelFamily)) {
+        selectedQuantization = GgufQuantization.F16
+    }
     val urlValidation = remember(downloadUrl, downloader) {
         downloader.validateSafetensorsUrl(downloadUrl)
     }
@@ -108,7 +114,8 @@ fun ConversionScreen(
                     request = ConversionRequest(
                         input = ready.input,
                         output = uri,
-                        quantization = selectedQuantization
+                        quantization = selectedQuantization,
+                        modelFamily = selectedModelFamily
                     ),
                     onStateChange = { state = it }
                 )
@@ -151,9 +158,15 @@ fun ConversionScreen(
                     Text("Select model files")
                 }
 
+                ModelFamilySelector(
+                    selected = selectedModelFamily,
+                    onSelected = { selectedModelFamily = it }
+                )
+
                 ModelBundleSummary(state = state)
 
                 QuantizationSelector(
+                    modelFamily = selectedModelFamily,
                     selected = selectedQuantization,
                     onSelected = { selectedQuantization = it }
                 )
@@ -214,7 +227,46 @@ fun ConversionScreen(
 }
 
 @Composable
+private fun ModelFamilySelector(
+    selected: ModelFamily,
+    onSelected: (ModelFamily) -> Unit
+) {
+    Column(
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = "Model Family",
+            style = MaterialTheme.typography.titleMedium
+        )
+        Text(
+            text = selected.description,
+            style = MaterialTheme.typography.bodySmall
+        )
+        ModelFamily.entries.chunked(2).forEach { rowItems ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                rowItems.forEach { family ->
+                    OutlinedButton(
+                        onClick = { onSelected(family) },
+                        modifier = Modifier.weight(1f),
+                        enabled = family.nativeWriterEnabled && family != selected
+                    ) {
+                        Text(family.label)
+                    }
+                }
+                if (rowItems.size == 1) {
+                    Spacer(modifier = Modifier.weight(1f))
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun QuantizationSelector(
+    modelFamily: ModelFamily,
     selected: GgufQuantization,
     onSelected: (GgufQuantization) -> Unit
 ) {
@@ -235,7 +287,7 @@ private fun QuantizationSelector(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 rowItems.forEach { quantization ->
-                    val enabled = quantization.nativeWriterEnabled && quantization != selected
+                    val enabled = quantization.isSupportedFor(modelFamily) && quantization != selected
                     OutlinedButton(
                         onClick = { onSelected(quantization) },
                         modifier = Modifier.weight(1f),

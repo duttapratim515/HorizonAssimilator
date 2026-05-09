@@ -8,7 +8,8 @@ import java.io.File
 data class NativeGgufRequest(
     val modelDirectory: File,
     val outputFile: File,
-    val quantization: GgufQuantization
+    val quantization: GgufQuantization,
+    val modelFamily: ModelFamily
 )
 
 interface GgufEngine {
@@ -37,7 +38,8 @@ class NativeGgufEngine : GgufEngine {
                 nativeConvertToGguf(
                     modelDirectoryPath = request.modelDirectory.absolutePath,
                     outputFilePath = request.outputFile.absolutePath,
-                    quantization = request.quantization.label
+                    quantization = request.quantization.label,
+                    modelFamily = request.modelFamily.name
                 )
             }
 
@@ -52,7 +54,8 @@ class NativeGgufEngine : GgufEngine {
     private external fun nativeConvertToGguf(
         modelDirectoryPath: String,
         outputFilePath: String,
-        quantization: String
+        quantization: String,
+        modelFamily: String
     ): Int
 
     private external fun nativeLastError(): String

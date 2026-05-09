@@ -1069,6 +1069,147 @@ bool quantize_range_to_q8_0(
     return true;
 }
 
+bool quantize_range_to_q5_0(
+        const HorizonGgufTensorSource &tensor,
+        std::ofstream &output,
+        std::string &error) {
+    const uint64_t source_stride = tensor.source_encoding == HorizonTensorEncoding::F32 ? 4 : 2;
+    const uint64_t element_count = tensor.source_data_size / source_stride;
+    if (tensor.source_data_size % source_stride != 0 || element_count % 32 != 0) {
+        error = "Tensor " + tensor.name + " cannot be Q5_0 quantized because its element count is not a multiple of 32.";
+        return false;
+    }
+
+    std::ifstream input(tensor.source_path, std::ios::binary);
+    if (!input) {
+        error = "Unable to open tensor source " + tensor.source_path + ".";
+        return false;
+    }
+    input.seekg(static_cast<std::streamoff>(tensor.source_offset), std::ios::beg);
+    if (!input) {
+        error = "Unable to seek tensor source " + tensor.source_path + ".";
+        return false;
+    }
+
+    std::vector<char> source_block(static_cast<size_t>(source_stride * 32));
+    std::vector<float> values(32);
+    for (uint64_t block = 0; block < element_count / 32; ++block) {
+        input.read(source_block.data(), static_cast<std::streamsize>(source_block.size()));
+        if (static_cast<size_t>(input.gcount()) != source_block.size()) {
+            error = "Unable to read tensor data for " + tensor.name + ".";
+            return false;
+        }
+
+        float abs_max = 0.0f;
+        float max_value = 0.0f;
+        for (size_t index = 0; index < 32; ++index) {
+            values[index] = read_source_float(source_block.data() + index * source_stride, tensor.source_encoding);
+            const float absolute = std::fabs(values[index]);
+            if (absolute > abs_max) {
+                abs_max = absolute;
+                max_value = values[index];
+            }
+        }
+
+        const float scale = max_value / -16.0f;
+        const float inverse_scale = scale != 0.0f ? 1.0f / scale : 0.0f;
+        const uint16_t scale_half = float32_bits_to_float16(float32_to_bits(scale));
+        char encoded[22] = {};
+        encoded[0] = static_cast<char>(scale_half & 0xFFU);
+        encoded[1] = static_cast<char>((scale_half >> 8) & 0xFFU);
+
+        uint32_t high_bits = 0;
+        for (int index = 0; index < 16; ++index) {
+            const uint8_t low_index = static_cast<uint8_t>(
+                    clamp_int(static_cast<int>(values[index] * inverse_scale + 16.5f), 0, 31));
+            const uint8_t high_index = static_cast<uint8_t>(
+                    clamp_int(static_cast<int>(values[index + 16] * inverse_scale + 16.5f), 0, 31));
+            encoded[6 + index] = static_cast<char>((low_index & 0x0FU) | ((high_index & 0x0FU) << 4U));
+            high_bits |= static_cast<uint32_t>((low_index & 0x10U) >> 4U) << index;
+            high_bits |= static_cast<uint32_t>((high_index & 0x10U) >> 4U) << (index + 16);
+        }
+        encoded[2] = static_cast<char>(high_bits & 0xFFU);
+        encoded[3] = static_cast<char>((high_bits >> 8) & 0xFFU);
+        encoded[4] = static_cast<char>((high_bits >> 16) & 0xFFU);
+        encoded[5] = static_cast<char>((high_bits >> 24) & 0xFFU);
+
+        output.write(encoded, sizeof(encoded));
+        if (!output) {
+            error = "Unable to write Q5_0 tensor data for " + tensor.name + ".";
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool quantize_range_to_q4_0(
+        const HorizonGgufTensorSource &tensor,
+        std::ofstream &output,
+        std::string &error) {
+    const uint64_t source_stride = tensor.source_encoding == HorizonTensorEncoding::F32 ? 4 : 2;
+    const uint64_t element_count = tensor.source_data_size / source_stride;
+    if (tensor.source_data_size % source_stride != 0 || element_count % 32 != 0) {
+        error = "Tensor " + tensor.name + " cannot be Q4_0 quantized because its element count is not a multiple of 32.";
+        return false;
+    }
+
+    std::ifstream input(tensor.source_path, std::ios::binary);
+    if (!input) {
+        error = "Unable to open tensor source " + tensor.source_path + ".";
+        return false;
+    }
+    input.seekg(static_cast<std::streamoff>(tensor.source_offset), std::ios::beg);
+    if (!input) {
+        error = "Unable to seek tensor source " + tensor.source_path + ".";
+        return false;
+    }
+
+    std::vector<char> source_block(static_cast<size_t>(source_stride * 32));
+    std::vector<float> values(32);
+    for (uint64_t block = 0; block < element_count / 32; ++block) {
+        input.read(source_block.data(), static_cast<std::streamsize>(source_block.size()));
+        if (static_cast<size_t>(input.gcount()) != source_block.size()) {
+            error = "Unable to read tensor data for " + tensor.name + ".";
+            return false;
+        }
+
+        float abs_max = 0.0f;
+        float max_value = 0.0f;
+        for (size_t index = 0; index < 32; ++index) {
+            values[index] = read_source_float(source_block.data() + index * source_stride, tensor.source_encoding);
+            const float absolute = std::fabs(values[index]);
+            if (absolute > abs_max) {
+                abs_max = absolute;
+                max_value = values[index];
+            }
+        }
+
+        const float scale = max_value / -8.0f;
+        const float inverse_scale = scale != 0.0f ? 1.0f / scale : 0.0f;
+        const uint16_t scale_half = float32_bits_to_float16(float32_to_bits(scale));
+        char encoded[18] = {};
+        encoded[0] = static_cast<char>(scale_half & 0xFFU);
+        encoded[1] = static_cast<char>((scale_half >> 8) & 0xFFU);
+
+        for (int index = 0; index < 16; ++index) {
+            const uint8_t low_index = static_cast<uint8_t>(
+                    clamp_int(static_cast<int>(values[index] * inverse_scale + 8.5f), 0, 15));
+            const uint8_t high_index = static_cast<uint8_t>(
+                    clamp_int(static_cast<int>(values[index + 16] * inverse_scale + 8.5f), 0, 15));
+            encoded[2 + index] = static_cast<char>((low_index & 0x0FU) | ((high_index & 0x0FU) << 4U));
+        }
+
+        output.write(encoded, sizeof(encoded));
+        if (!output) {
+            error = "Unable to write Q4_0 tensor data for " + tensor.name + ".";
+            return false;
+        }
+    }
+
+    return true;
+}
+
 bool quantize_range_to_q6_k(
         const HorizonGgufTensorSource &tensor,
         std::ofstream &output,
@@ -1273,6 +1414,12 @@ bool write_tensor_data(
     }
     if (tensor.output_encoding == HorizonTensorOutputEncoding::Q8_0) {
         return quantize_range_to_q8_0(tensor, output, error);
+    }
+    if (tensor.output_encoding == HorizonTensorOutputEncoding::Q4_0) {
+        return quantize_range_to_q4_0(tensor, output, error);
+    }
+    if (tensor.output_encoding == HorizonTensorOutputEncoding::Q5_0) {
+        return quantize_range_to_q5_0(tensor, output, error);
     }
     if (tensor.output_encoding == HorizonTensorOutputEncoding::Q6_K) {
         return quantize_range_to_q6_k(tensor, output, error);

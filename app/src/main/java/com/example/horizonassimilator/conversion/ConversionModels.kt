@@ -56,7 +56,8 @@ sealed interface ConversionState {
 data class ConversionRequest(
     val input: SelectedModel,
     val output: Uri,
-    val quantization: GgufQuantization = GgufQuantization.F16
+    val quantization: GgufQuantization = GgufQuantization.F16,
+    val modelFamily: ModelFamily = ModelFamily.LLAMA
 )
 
 data class ConversionProgress(
@@ -68,7 +69,8 @@ enum class GgufQuantization(
     val label: String,
     val description: String,
     val estimatedOutputRatio: Double,
-    val nativeWriterEnabled: Boolean = false
+    val nativeWriterEnabled: Boolean = false,
+    val supportedFamilies: Set<ModelFamily> = setOf(ModelFamily.LLAMA, ModelFamily.QWEN)
 ) {
     F16(
         label = "F16",
@@ -94,6 +96,20 @@ enum class GgufQuantization(
         estimatedOutputRatio = 0.35,
         nativeWriterEnabled = true
     ),
+    Q5_0(
+        label = "Q5_0",
+        description = "Compatibility 5-bit quantization with 32-wide blocks for Qwen-sized rows.",
+        estimatedOutputRatio = 0.39,
+        nativeWriterEnabled = true,
+        supportedFamilies = setOf(ModelFamily.QWEN)
+    ),
+    Q4_0(
+        label = "Q4_0",
+        description = "Compatibility 4-bit quantization with 32-wide blocks for Qwen-sized rows.",
+        estimatedOutputRatio = 0.32,
+        nativeWriterEnabled = true,
+        supportedFamilies = setOf(ModelFamily.QWEN)
+    ),
     Q4_K_M(
         label = "Q4_K_M",
         description = "Validation mode. Compact 4-bit K-quant output for mobile GGUF files.",
@@ -111,5 +127,36 @@ enum class GgufQuantization(
         description = "Validation mode. Smallest enabled K-quant output for aggressive mobile compression.",
         estimatedOutputRatio = 0.22,
         nativeWriterEnabled = true
+    )
+}
+
+fun GgufQuantization.isSupportedFor(family: ModelFamily): Boolean {
+    return nativeWriterEnabled && family in supportedFamilies
+}
+
+enum class ModelFamily(
+    val label: String,
+    val description: String,
+    val nativeWriterEnabled: Boolean
+) {
+    LLAMA(
+        label = "LLaMA / Mistral",
+        description = "Current supported family for LLaMA-style safetensors.",
+        nativeWriterEnabled = true
+    ),
+    QWEN(
+        label = "Qwen",
+        description = "Qwen2/Qwen2.5-style safetensors with BPE tokenizer metadata.",
+        nativeWriterEnabled = true
+    ),
+    GEMMA(
+        label = "Gemma",
+        description = "Planned family. Tensor mapping is not enabled yet.",
+        nativeWriterEnabled = false
+    ),
+    PHI(
+        label = "Phi",
+        description = "Planned family. Tensor mapping is not enabled yet.",
+        nativeWriterEnabled = false
     )
 }
