@@ -11,6 +11,7 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -60,6 +61,16 @@ bool equals_ignore_case(std::string left, std::string right) {
     return left == right;
 }
 
+bool contains_ignore_case(std::string value, std::string needle) {
+    std::transform(value.begin(), value.end(), value.begin(), [](char item) {
+        return std::tolower(static_cast<unsigned char>(item));
+    });
+    std::transform(needle.begin(), needle.end(), needle.begin(), [](char item) {
+        return std::tolower(static_cast<unsigned char>(item));
+    });
+    return value.find(needle) != std::string::npos;
+}
+
 std::string read_text_file(const std::string &path, size_t max_bytes) {
     std::ifstream input(path, std::ios::binary);
     if (!input) {
@@ -93,13 +104,61 @@ std::string extract_json_string(const std::string &json, const std::string &key)
     return json.substr(quote + 1, end - quote - 1);
 }
 
+int hex_value(char value) {
+    if (value >= '0' && value <= '9') {
+        return value - '0';
+    }
+    if (value >= 'a' && value <= 'f') {
+        return 10 + value - 'a';
+    }
+    if (value >= 'A' && value <= 'F') {
+        return 10 + value - 'A';
+    }
+    return -1;
+}
+
+bool parse_json_hex4(const std::string &value, size_t offset, uint32_t &codepoint) {
+    if (offset + 4 > value.size()) {
+        return false;
+    }
+    uint32_t parsed = 0;
+    for (size_t index = 0; index < 4; ++index) {
+        const int digit = hex_value(value[offset + index]);
+        if (digit < 0) {
+            return false;
+        }
+        parsed = (parsed << 4U) | static_cast<uint32_t>(digit);
+    }
+    codepoint = parsed;
+    return true;
+}
+
+void append_utf8(std::string &output, uint32_t codepoint) {
+    if (codepoint <= 0x7FU) {
+        output.push_back(static_cast<char>(codepoint));
+    } else if (codepoint <= 0x7FFU) {
+        output.push_back(static_cast<char>(0xC0U | (codepoint >> 6U)));
+        output.push_back(static_cast<char>(0x80U | (codepoint & 0x3FU)));
+    } else if (codepoint <= 0xFFFFU) {
+        output.push_back(static_cast<char>(0xE0U | (codepoint >> 12U)));
+        output.push_back(static_cast<char>(0x80U | ((codepoint >> 6U) & 0x3FU)));
+        output.push_back(static_cast<char>(0x80U | (codepoint & 0x3FU)));
+    } else {
+        output.push_back(static_cast<char>(0xF0U | (codepoint >> 18U)));
+        output.push_back(static_cast<char>(0x80U | ((codepoint >> 12U) & 0x3FU)));
+        output.push_back(static_cast<char>(0x80U | ((codepoint >> 6U) & 0x3FU)));
+        output.push_back(static_cast<char>(0x80U | (codepoint & 0x3FU)));
+    }
+}
+
 std::string unescape_json_string(const std::string &value) {
     std::string output;
     output.reserve(value.size());
-    bool escaped = false;
-    for (char item : value) {
-        if (escaped) {
-            switch (item) {
+    for (size_t index = 0; index < value.size(); ++index) {
+        const char item = value[index];
+        if (item == '\\' && index + 1 < value.size()) {
+            const char escaped = value[++index];
+            switch (escaped) {
                 case 'n':
                     output.push_back('\n');
                     break;
@@ -112,15 +171,36 @@ std::string unescape_json_string(const std::string &value) {
                 case '\\':
                 case '"':
                 case '/':
-                    output.push_back(item);
+                    output.push_back(escaped);
                     break;
+                case 'u': {
+                    uint32_t codepoint = 0;
+                    if (parse_json_hex4(value, index + 1, codepoint)) {
+                        index += 4;
+                        if (codepoint >= 0xD800U && codepoint <= 0xDBFFU &&
+                            index + 6 < value.size() &&
+                            value[index + 1] == '\\' &&
+                            value[index + 2] == 'u') {
+                            uint32_t low_surrogate = 0;
+                            if (parse_json_hex4(value, index + 3, low_surrogate) &&
+                                low_surrogate >= 0xDC00U &&
+                                low_surrogate <= 0xDFFFU) {
+                                codepoint = 0x10000U +
+                                        ((codepoint - 0xD800U) << 10U) +
+                                        (low_surrogate - 0xDC00U);
+                                index += 6;
+                            }
+                        }
+                        append_utf8(output, codepoint);
+                    } else {
+                        output.push_back('u');
+                    }
+                    break;
+                }
                 default:
-                    output.push_back(item);
+                    output.push_back(escaped);
                     break;
             }
-            escaped = false;
-        } else if (item == '\\') {
-            escaped = true;
         } else {
             output.push_back(item);
         }
@@ -272,6 +352,62 @@ size_t find_matching_brace(const std::string &text, size_t object_start) {
     return std::string::npos;
 }
 
+size_t find_matching_bracket(const std::string &text, size_t array_start) {
+    int depth = 0;
+    bool in_string = false;
+    bool escaped = false;
+    for (size_t cursor = array_start; cursor < text.size(); ++cursor) {
+        const char value = text[cursor];
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (value == '\\') {
+                escaped = true;
+            } else if (value == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        if (value == '"') {
+            in_string = true;
+        } else if (value == '[') {
+            depth += 1;
+        } else if (value == ']') {
+            depth -= 1;
+            if (depth == 0) {
+                return cursor;
+            }
+        }
+    }
+    return std::string::npos;
+}
+
+bool read_json_string_at(
+        const std::string &json,
+        size_t quote_start,
+        std::string &value,
+        size_t &next_cursor) {
+    if (quote_start >= json.size() || json[quote_start] != '"') {
+        return false;
+    }
+    size_t quote_end = quote_start + 1;
+    bool escaped = false;
+    while (quote_end < json.size()) {
+        const char item = json[quote_end];
+        if (escaped) {
+            escaped = false;
+        } else if (item == '\\') {
+            escaped = true;
+        } else if (item == '"') {
+            value = unescape_json_string(json.substr(quote_start + 1, quote_end - quote_start - 1));
+            next_cursor = quote_end + 1;
+            return true;
+        }
+        quote_end += 1;
+    }
+    return false;
+}
+
 std::string map_llama_tensor_name(const std::string &source_name) {
     const std::string prefix = "model.layers.";
     if (source_name == "model.embed_tokens.weight") {
@@ -367,9 +503,94 @@ std::string map_qwen_tensor_name(const std::string &source_name) {
     return "";
 }
 
-std::string map_tensor_name(const std::string &source_name, const std::string &model_family) {
+std::string map_gemma_tensor_name(
+        const std::string &source_name,
+        const std::string &gguf_arch) {
+    const std::string language_prefix = "language_model.";
+    if (source_name.rfind(language_prefix, 0) == 0) {
+        return map_gemma_tensor_name(source_name.substr(language_prefix.size()), gguf_arch);
+    }
+
+    const std::string prefix = "model.layers.";
+    if (source_name == "model.embed_tokens.weight") {
+        return "token_embd.weight";
+    }
+    if (source_name == "model.norm.weight") {
+        return "output_norm.weight";
+    }
+    if (source_name == "lm_head.weight") {
+        return "";
+    }
+    if (source_name.rfind(prefix, 0) != 0) {
+        return "";
+    }
+
+    const size_t layer_start = prefix.size();
+    const size_t layer_end = source_name.find('.', layer_start);
+    if (layer_end == std::string::npos) {
+        return "";
+    }
+    const std::string layer = source_name.substr(layer_start, layer_end - layer_start);
+    const std::string rest = source_name.substr(layer_end + 1);
+
+    if (rest == "input_layernorm.weight") {
+        return "blk." + layer + ".attn_norm.weight";
+    }
+    if (rest == "post_attention_layernorm.weight" && gguf_arch == "gemma") {
+        return "blk." + layer + ".ffn_norm.weight";
+    }
+    if (rest == "post_attention_layernorm.weight") {
+        return "blk." + layer + ".post_attention_norm.weight";
+    }
+    if (rest == "pre_feedforward_layernorm.weight" && gguf_arch == "gemma3") {
+        return "blk." + layer + ".ffn_norm.weight";
+    }
+    if (rest == "pre_feedforward_layernorm.weight") {
+        return "blk." + layer + ".ffn_pre_norm.weight";
+    }
+    if (rest == "post_feedforward_layernorm.weight") {
+        return "blk." + layer + ".post_ffw_norm.weight";
+    }
+    if (rest == "self_attn.q_proj.weight") {
+        return "blk." + layer + ".attn_q.weight";
+    }
+    if (rest == "self_attn.k_proj.weight") {
+        return "blk." + layer + ".attn_k.weight";
+    }
+    if (rest == "self_attn.v_proj.weight") {
+        return "blk." + layer + ".attn_v.weight";
+    }
+    if (rest == "self_attn.o_proj.weight") {
+        return "blk." + layer + ".attn_output.weight";
+    }
+    if (rest == "self_attn.q_norm.weight") {
+        return "blk." + layer + ".attn_q_norm.weight";
+    }
+    if (rest == "self_attn.k_norm.weight") {
+        return "blk." + layer + ".attn_k_norm.weight";
+    }
+    if (rest == "mlp.gate_proj.weight") {
+        return "blk." + layer + ".ffn_gate.weight";
+    }
+    if (rest == "mlp.down_proj.weight") {
+        return "blk." + layer + ".ffn_down.weight";
+    }
+    if (rest == "mlp.up_proj.weight") {
+        return "blk." + layer + ".ffn_up.weight";
+    }
+
+    return "";
+}
+
+std::string map_tensor_name(
+        const std::string &source_name,
+        const std::string &model_family,
+        const std::string &gguf_arch) {
     if (model_family == "QWEN") {
         return map_qwen_tensor_name(source_name);
+    }
+    if (model_family == "GEMMA") {
+        return map_gemma_tensor_name(source_name, gguf_arch);
     }
     return map_llama_tensor_name(source_name);
 }
@@ -426,6 +647,9 @@ bool is_supported_family_quantization(
         const std::string &model_family,
         const std::string &quantization) {
     if ((quantization == "Q4_0" || quantization == "Q5_0") && model_family != "QWEN") {
+        return false;
+    }
+    if (model_family == "GEMMA" && quantization != "F16" && quantization != "Q8_0") {
         return false;
     }
     return true;
@@ -532,6 +756,12 @@ bool should_quantize_tensor_q3_k(
 
 bool should_keep_tensor_f32(const SafetensorsTensor &tensor) {
     return tensor.shape.size() <= 1 || ends_with(tensor.gguf_name, "_norm.weight");
+}
+
+float source_float_add_for_tensor(
+        const SafetensorsTensor &tensor,
+        const std::string &model_family) {
+    return model_family == "GEMMA" && ends_with(tensor.source_name, "norm.weight") ? 1.0f : 0.0f;
 }
 
 uint32_t row_permutation_heads_for_tensor(
@@ -698,11 +928,20 @@ uint64_t output_data_size_for_tensor(
     return element_count * 2;
 }
 
+SafetensorsTensor tensor_with_shape(
+        const SafetensorsTensor &tensor,
+        const std::vector<uint64_t> &shape) {
+    SafetensorsTensor output = tensor;
+    output.shape = shape;
+    return output;
+}
+
 std::vector<SafetensorsTensor> parse_safetensors_tensors(
         const std::string &header,
         const WorkspaceFile &source_file,
         uint64_t header_length,
-        const std::string &model_family) {
+        const std::string &model_family,
+        const std::string &gguf_arch) {
     std::vector<SafetensorsTensor> tensors;
     size_t cursor = 0;
     while (cursor < header.size()) {
@@ -741,7 +980,7 @@ std::vector<SafetensorsTensor> parse_safetensors_tensors(
         if (object_json.find("\"data_offsets\"") != std::string::npos && offsets.size() == 2) {
             SafetensorsTensor tensor {
                     name,
-                    map_tensor_name(name, model_family),
+                    map_tensor_name(name, model_family, gguf_arch),
                     extract_object_string(object_json, "dtype"),
                     extract_uint_array(object_json, "shape"),
                     source_file.path,
@@ -832,65 +1071,165 @@ float extract_json_float(const std::string &json, const std::string &key, float 
     return std::stof(json.substr(cursor, end - cursor));
 }
 
-std::vector<std::string> extract_tokenizer_json_vocab(const std::string &tokenizer_json) {
+bool has_json_number(const std::string &json, const std::string &key) {
+    const std::string needle = "\"" + key + "\"";
+    size_t key_pos = json.find(needle);
+    if (key_pos == std::string::npos) {
+        return false;
+    }
+    size_t colon = json.find(':', key_pos + needle.size());
+    if (colon == std::string::npos) {
+        return false;
+    }
+    size_t cursor = colon + 1;
+    while (cursor < json.size() && std::isspace(static_cast<unsigned char>(json[cursor]))) {
+        cursor += 1;
+    }
+    return cursor < json.size() &&
+           (std::isdigit(static_cast<unsigned char>(json[cursor])) ||
+            json[cursor] == '-' ||
+            json[cursor] == '.');
+}
+
+std::vector<std::string> extract_tokenizer_json_vocab(
+        const std::string &tokenizer_json,
+        std::vector<float> &scores) {
     const std::string vocab_key = "\"vocab\"";
     size_t key_pos = tokenizer_json.find(vocab_key);
     if (key_pos == std::string::npos) {
         return {};
     }
-    size_t object_start = tokenizer_json.find('{', key_pos + vocab_key.size());
-    if (object_start == std::string::npos) {
+    size_t colon = tokenizer_json.find(':', key_pos + vocab_key.size());
+    if (colon == std::string::npos) {
         return {};
     }
-    size_t object_end = find_matching_brace(tokenizer_json, object_start);
-    if (object_end == std::string::npos) {
+    size_t value_start = colon + 1;
+    while (value_start < tokenizer_json.size() &&
+           std::isspace(static_cast<unsigned char>(tokenizer_json[value_start]))) {
+        value_start += 1;
+    }
+    if (value_start >= tokenizer_json.size()) {
         return {};
     }
 
     std::map<uint32_t, std::string> id_to_token;
-    size_t cursor = object_start + 1;
-    while (cursor < object_end) {
-        size_t token_start = tokenizer_json.find('"', cursor);
-        if (token_start == std::string::npos || token_start >= object_end) {
-            break;
+    std::map<uint32_t, float> id_to_score;
+    if (tokenizer_json[value_start] == '{') {
+        const size_t object_start = value_start;
+        const size_t object_end = find_matching_brace(tokenizer_json, object_start);
+        if (object_end == std::string::npos) {
+            return {};
         }
-        size_t token_end = token_start + 1;
-        bool escaped = false;
-        while (token_end < object_end) {
-            const char value = tokenizer_json[token_end];
-            if (escaped) {
-                escaped = false;
-            } else if (value == '\\') {
-                escaped = true;
-            } else if (value == '"') {
+
+        size_t cursor = object_start + 1;
+        while (cursor < object_end) {
+            size_t token_start = tokenizer_json.find('"', cursor);
+            if (token_start == std::string::npos || token_start >= object_end) {
                 break;
             }
-            token_end += 1;
-        }
-        if (token_end >= object_end) {
-            break;
-        }
+            size_t token_end = token_start + 1;
+            bool escaped = false;
+            while (token_end < object_end) {
+                const char value = tokenizer_json[token_end];
+                if (escaped) {
+                    escaped = false;
+                } else if (value == '\\') {
+                    escaped = true;
+                } else if (value == '"') {
+                    break;
+                }
+                token_end += 1;
+            }
+            if (token_end >= object_end) {
+                break;
+            }
 
-        size_t colon = tokenizer_json.find(':', token_end + 1);
-        if (colon == std::string::npos || colon >= object_end) {
-            break;
-        }
-        size_t id_start = colon + 1;
-        while (id_start < object_end && !std::isdigit(static_cast<unsigned char>(tokenizer_json[id_start]))) {
-            id_start += 1;
-        }
-        if (id_start >= object_end) {
-            break;
-        }
-        size_t id_end = id_start;
-        while (id_end < object_end && std::isdigit(static_cast<unsigned char>(tokenizer_json[id_end]))) {
-            id_end += 1;
-        }
+            size_t id_colon = tokenizer_json.find(':', token_end + 1);
+            if (id_colon == std::string::npos || id_colon >= object_end) {
+                break;
+            }
+            size_t id_start = id_colon + 1;
+            while (id_start < object_end && !std::isdigit(static_cast<unsigned char>(tokenizer_json[id_start]))) {
+                id_start += 1;
+            }
+            if (id_start >= object_end) {
+                break;
+            }
+            size_t id_end = id_start;
+            while (id_end < object_end && std::isdigit(static_cast<unsigned char>(tokenizer_json[id_end]))) {
+                id_end += 1;
+            }
 
-        const std::string raw_token = tokenizer_json.substr(token_start + 1, token_end - token_start - 1);
-        const uint32_t token_id = static_cast<uint32_t>(std::stoul(tokenizer_json.substr(id_start, id_end - id_start)));
-        id_to_token[token_id] = unescape_json_string(raw_token);
-        cursor = id_end + 1;
+            const std::string raw_token = tokenizer_json.substr(token_start + 1, token_end - token_start - 1);
+            const uint32_t token_id =
+                    static_cast<uint32_t>(std::stoul(tokenizer_json.substr(id_start, id_end - id_start)));
+            id_to_token[token_id] = unescape_json_string(raw_token);
+            id_to_score[token_id] = 0.0f;
+            cursor = id_end + 1;
+        }
+    } else if (tokenizer_json[value_start] == '[') {
+        uint32_t token_id = 0;
+        size_t cursor = value_start + 1;
+        while (cursor < tokenizer_json.size()) {
+            while (cursor < tokenizer_json.size() &&
+                   std::isspace(static_cast<unsigned char>(tokenizer_json[cursor]))) {
+                cursor += 1;
+            }
+            if (cursor >= tokenizer_json.size() || tokenizer_json[cursor] == ']') {
+                break;
+            }
+            if (tokenizer_json[cursor] != '[') {
+                cursor += 1;
+                continue;
+            }
+            size_t token_start = tokenizer_json.find('"', cursor + 1);
+            if (token_start == std::string::npos) {
+                break;
+            }
+            size_t token_end = token_start + 1;
+            bool escaped = false;
+            while (token_end < tokenizer_json.size()) {
+                const char value = tokenizer_json[token_end];
+                if (escaped) {
+                    escaped = false;
+                } else if (value == '\\') {
+                    escaped = true;
+                } else if (value == '"') {
+                    break;
+                }
+                token_end += 1;
+            }
+            if (token_end >= tokenizer_json.size()) {
+                break;
+            }
+            size_t comma = tokenizer_json.find(',', token_end + 1);
+            size_t entry_end = tokenizer_json.find(']', token_end + 1);
+            if (comma == std::string::npos || entry_end == std::string::npos || comma > entry_end) {
+                break;
+            }
+            size_t score_start = comma + 1;
+            while (score_start < entry_end &&
+                   std::isspace(static_cast<unsigned char>(tokenizer_json[score_start]))) {
+                score_start += 1;
+            }
+            size_t score_end = score_start;
+            while (score_end < entry_end &&
+                   (std::isdigit(static_cast<unsigned char>(tokenizer_json[score_end])) ||
+                    tokenizer_json[score_end] == '-' ||
+                    tokenizer_json[score_end] == '+' ||
+                    tokenizer_json[score_end] == '.' ||
+                    tokenizer_json[score_end] == 'e' ||
+                    tokenizer_json[score_end] == 'E')) {
+                score_end += 1;
+            }
+            const std::string raw_token = tokenizer_json.substr(token_start + 1, token_end - token_start - 1);
+            id_to_token[token_id] = unescape_json_string(raw_token);
+            id_to_score[token_id] = score_end > score_start
+                    ? std::stof(tokenizer_json.substr(score_start, score_end - score_start))
+                    : 0.0f;
+            token_id += 1;
+            cursor = entry_end + 1;
+        }
     }
 
     const std::string added_key = "\"added_tokens\"";
@@ -919,6 +1258,7 @@ std::vector<std::string> extract_tokenizer_json_vocab(const std::string &tokeniz
             const std::string token_content = extract_json_string(added_object, "content");
             if (token_id != UINT32_MAX && !token_content.empty()) {
                 id_to_token[token_id] = token_content;
+                id_to_score[token_id] = 0.0f;
             }
             added_cursor = added_object_end + 1;
         }
@@ -929,8 +1269,14 @@ std::vector<std::string> extract_tokenizer_json_vocab(const std::string &tokeniz
     }
     const uint32_t max_id = id_to_token.rbegin()->first;
     std::vector<std::string> tokens(static_cast<size_t>(max_id) + 1);
+    scores.assign(tokens.size(), 0.0f);
     for (const auto &entry : id_to_token) {
         tokens[entry.first] = entry.second;
+    }
+    for (const auto &entry : id_to_score) {
+        if (entry.first < scores.size()) {
+            scores[entry.first] = entry.second;
+        }
     }
     return tokens;
 }
@@ -945,6 +1291,37 @@ void normalize_qwen_tokens(
         if (tokens[index].empty()) {
             tokens[index] = "[PAD" + std::to_string(index) + "]";
         }
+    }
+}
+
+void normalize_gemma_tokens(
+        std::vector<std::string> &tokens,
+        std::vector<float> &scores,
+        uint32_t config_vocab_size) {
+    if (config_vocab_size > 0 && tokens.size() > config_vocab_size) {
+        tokens.resize(config_vocab_size);
+        if (scores.size() > config_vocab_size) {
+            scores.resize(config_vocab_size);
+        }
+    }
+
+    std::unordered_set<std::string> seen;
+    seen.reserve(tokens.size());
+    for (size_t index = 0; index < tokens.size(); ++index) {
+        std::string token = tokens[index];
+        if (!token.empty() && seen.insert(token).second) {
+            continue;
+        }
+
+        std::string replacement;
+        size_t candidate = index;
+        do {
+            replacement = "[PAD" + std::to_string(candidate) + "]";
+            ++candidate;
+        } while (seen.find(replacement) != seen.end());
+
+        tokens[index] = replacement;
+        seen.insert(replacement);
     }
 }
 
@@ -975,38 +1352,61 @@ std::vector<std::string> extract_tokenizer_json_merges(const std::string &tokeni
     if (array_start == std::string::npos) {
         return {};
     }
+    const size_t array_end = find_matching_bracket(tokenizer_json, array_start);
+    if (array_end == std::string::npos) {
+        return {};
+    }
 
     std::vector<std::string> merges;
     size_t cursor = array_start + 1;
-    while (cursor < tokenizer_json.size()) {
-        size_t item_start = tokenizer_json.find('"', cursor);
-        size_t array_end = tokenizer_json.find(']', cursor);
-        if (array_end != std::string::npos && (item_start == std::string::npos || array_end < item_start)) {
+    while (cursor < array_end) {
+        while (cursor < array_end &&
+               (std::isspace(static_cast<unsigned char>(tokenizer_json[cursor])) ||
+                tokenizer_json[cursor] == ',')) {
+            cursor += 1;
+        }
+        if (cursor >= array_end) {
             break;
         }
-        if (item_start == std::string::npos) {
-            break;
-        }
-
-        size_t item_end = item_start + 1;
-        bool escaped = false;
-        while (item_end < tokenizer_json.size()) {
-            const char value = tokenizer_json[item_end];
-            if (escaped) {
-                escaped = false;
-            } else if (value == '\\') {
-                escaped = true;
-            } else if (value == '"') {
+        if (tokenizer_json[cursor] == '[') {
+            const size_t pair_end = find_matching_bracket(tokenizer_json, cursor);
+            if (pair_end == std::string::npos || pair_end > array_end) {
                 break;
             }
-            item_end += 1;
+            size_t left_start = tokenizer_json.find('"', cursor + 1);
+            if (left_start == std::string::npos || left_start >= pair_end) {
+                cursor = pair_end + 1;
+                continue;
+            }
+            std::string left;
+            size_t after_left = 0;
+            if (!read_json_string_at(tokenizer_json, left_start, left, after_left)) {
+                cursor = pair_end + 1;
+                continue;
+            }
+            size_t right_start = tokenizer_json.find('"', after_left);
+            if (right_start == std::string::npos || right_start >= pair_end) {
+                cursor = pair_end + 1;
+                continue;
+            }
+            std::string right;
+            size_t after_right = 0;
+            if (read_json_string_at(tokenizer_json, right_start, right, after_right)) {
+                merges.push_back(left + " " + right);
+            }
+            cursor = pair_end + 1;
+        } else if (tokenizer_json[cursor] == '"') {
+            std::string item;
+            size_t next = 0;
+            if (read_json_string_at(tokenizer_json, cursor, item, next)) {
+                merges.push_back(item);
+                cursor = next;
+            } else {
+                break;
+            }
+        } else {
+            cursor += 1;
         }
-        if (item_end >= tokenizer_json.size()) {
-            break;
-        }
-
-        merges.push_back(unescape_json_string(tokenizer_json.substr(item_start + 1, item_end - item_start - 1)));
-        cursor = item_end + 1;
     }
     return merges;
 }
@@ -1151,6 +1551,7 @@ std::vector<int32_t> build_token_types(
         const std::vector<std::string> &tokens,
         const std::string &model_family) {
     std::vector<int32_t> token_types = build_token_types(tokenizer_json, tokens.size());
+    constexpr int32_t kUnknownToken = 2;
     constexpr int32_t kByteToken = 6;
     constexpr int32_t kControlToken = 3;
     constexpr int32_t kUserDefinedToken = 4;
@@ -1164,6 +1565,22 @@ std::vector<int32_t> build_token_types(
                 token_types[index] = added->second ? kControlToken : kUserDefinedToken;
             } else if (tokens[index].rfind("[PAD", 0) == 0 || tokens[index].rfind("[unused", 0) == 0) {
                 token_types[index] = kUnusedToken;
+            }
+        }
+    }
+    if (model_family == "GEMMA") {
+        for (size_t index = 0; index < tokens.size(); ++index) {
+            const std::string &token = tokens[index];
+            if (token == "<unk>") {
+                token_types[index] = kUnknownToken;
+            } else if (token == "<pad>" ||
+                       token == "<eos>" ||
+                       token == "<bos>" ||
+                       token == "<mask>" ||
+                       token.rfind("<start_of_", 0) == 0 ||
+                       token.rfind("<end_of_", 0) == 0 ||
+                       token.rfind("<unused", 0) == 0) {
+                token_types[index] = kControlToken;
             }
         }
     }
@@ -1188,6 +1605,9 @@ std::string tokenizer_pre_for_model(
         const std::string &model_family,
         const std::string &tokenizer_model,
         uint32_t vocab_size) {
+    if (model_family == "GEMMA" && tokenizer_model == "gemma4") {
+        return "gemma4";
+    }
     if (tokenizer_model != "gpt2") {
         return "default";
     }
@@ -1222,6 +1642,18 @@ std::string gguf_architecture_name(
             return "qwen3";
         }
         return "qwen2";
+    }
+    if (model_family == "GEMMA") {
+        if (source.find("gemma3n") != std::string::npos || source.find("gemma-3n") != std::string::npos) {
+            return "gemma3n";
+        }
+        if (source.find("gemma3") != std::string::npos) {
+            return "gemma3";
+        }
+        if (source.find("gemma2") != std::string::npos) {
+            return "gemma2";
+        }
+        return "gemma";
     }
     if (source.find("mistral") != std::string::npos) {
         return "llama";
@@ -1270,6 +1702,7 @@ HorizonGgufMetadataWriter build_metadata_writer(
         const std::string &config_json,
         const std::string &tokenizer_json,
         const std::vector<std::string> &tokens,
+        const std::vector<float> &scores,
         const std::string &tokenizer_model,
         const std::vector<std::string> &merges,
         const std::vector<int32_t> &token_types,
@@ -1296,15 +1729,51 @@ HorizonGgufMetadataWriter build_metadata_writer(
     const uint32_t head_count = extract_json_uint32(config_json, "num_attention_heads", 0);
     writer.add_uint32(prefix + ".attention.head_count", head_count);
     writer.add_uint32(prefix + ".attention.head_count_kv", extract_json_uint32(config_json, "num_key_value_heads", head_count));
-    writer.add_uint32(prefix + ".rope.dimension_count", extract_json_uint32(config_json, "hidden_size", 0) / (head_count == 0 ? 1 : head_count));
+    const uint32_t head_dim = extract_json_uint32(
+            config_json,
+            "head_dim",
+            extract_json_uint32(config_json, "hidden_size", 0) / (head_count == 0 ? 1 : head_count));
+    writer.add_uint32(prefix + ".rope.dimension_count", head_dim);
+    if (model_family == "GEMMA" && head_dim != 0) {
+        writer.add_uint32(prefix + ".attention.key_length", head_dim);
+        writer.add_uint32(prefix + ".attention.value_length", head_dim);
+    }
     writer.add_float32(prefix + ".rope.freq_base", extract_json_float(config_json, "rope_theta", 10000.0f));
     writer.add_float32(
             prefix + ".attention.layer_norm_rms_epsilon",
             extract_json_float(config_json, "rms_norm_eps", 0.00001f));
+    if (model_family == "GEMMA") {
+        if (has_json_number(config_json, "attn_logit_softcapping")) {
+            writer.add_float32(
+                    prefix + ".attn_logit_softcapping",
+                    extract_json_float(config_json, "attn_logit_softcapping", 0.0f));
+        }
+        if (has_json_number(config_json, "final_logit_softcapping")) {
+            writer.add_float32(
+                    prefix + ".final_logit_softcapping",
+                    extract_json_float(config_json, "final_logit_softcapping", 0.0f));
+        }
+        const uint32_t sliding_window = extract_json_uint32(config_json, "sliding_window", 0);
+        if (sliding_window != 0) {
+            writer.add_uint32(prefix + ".attention.sliding_window", sliding_window);
+            writer.add_float32(
+                    prefix + ".rope.freq_base_swa",
+                    extract_json_float(config_json, "rope_local_base_freq", 10000.0f));
+            const uint32_t sliding_window_pattern = extract_json_uint32(
+                    config_json,
+                    "sliding_window_pattern",
+                    extract_json_uint32(config_json, "_sliding_window_pattern", 0));
+            if (sliding_window_pattern != 0) {
+                writer.add_uint32(prefix + ".attention.sliding_window_pattern", sliding_window_pattern);
+            }
+        }
+    }
     writer.add_string("tokenizer.ggml.model", tokenizer_model);
     writer.add_string("tokenizer.ggml.pre", tokenizer_pre_for_model(model_family, tokenizer_model, vocab_size));
     writer.add_string_array("tokenizer.ggml.tokens", tokens);
-    writer.add_float32_array("tokenizer.ggml.scores", std::vector<float>(tokens.size(), 0.0f));
+    writer.add_float32_array(
+            "tokenizer.ggml.scores",
+            scores.size() == tokens.size() ? scores : std::vector<float>(tokens.size(), 0.0f));
     writer.add_int32_array("tokenizer.ggml.token_type", token_types);
     if (!merges.empty()) {
         writer.add_string_array("tokenizer.ggml.merges", merges);
@@ -1320,10 +1789,21 @@ HorizonGgufMetadataWriter build_metadata_writer(
     } else {
         writer.add_uint32("tokenizer.ggml.bos_token_id", extract_json_uint32(config_json, "bos_token_id", 1));
         writer.add_uint32("tokenizer.ggml.eos_token_id", extract_json_uint32(config_json, "eos_token_id", 2));
-        writer.add_uint32("tokenizer.ggml.unknown_token_id", extract_json_uint32(config_json, "unk_token_id", 0));
+        writer.add_uint32(
+                "tokenizer.ggml.unknown_token_id",
+                extract_json_uint32(config_json, "unk_token_id", model_family == "GEMMA" ? 3 : 0));
+        if (model_family == "GEMMA" && has_json_number(config_json, "pad_token_id")) {
+            writer.add_uint32(
+                    "tokenizer.ggml.padding_token_id",
+                    extract_json_uint32(config_json, "pad_token_id", 0));
+        }
     }
     writer.add_bool("tokenizer.ggml.add_bos_token", should_add_bos_token(model_family, vocab_size));
     writer.add_bool("tokenizer.ggml.add_eos_token", false);
+    if (model_family == "GEMMA") {
+        writer.add_bool("tokenizer.ggml.add_sep_token", false);
+        writer.add_bool("tokenizer.ggml.add_space_prefix", false);
+    }
 
     return writer;
 }
@@ -1362,7 +1842,8 @@ int count_weight_map_entries(const std::string &index_json) {
 
 SafetensorsHeader read_safetensors_header(
         const WorkspaceFile &file,
-        const std::string &model_family) {
+        const std::string &model_family,
+        const std::string &gguf_arch) {
     if (file.size < 8) {
         return {false, 0, 0, 0, "file is too small for a safetensors header"};
     }
@@ -1404,7 +1885,7 @@ SafetensorsHeader read_safetensors_header(
     }
 
     const std::vector<SafetensorsTensor> tensors =
-            parse_safetensors_tensors(header, file, header_length, model_family);
+            parse_safetensors_tensors(header, file, header_length, model_family, gguf_arch);
     int mapped_tensor_count = 0;
     for (const SafetensorsTensor &tensor : tensors) {
         if (!tensor.gguf_name.empty()) {
@@ -1419,7 +1900,8 @@ bool read_safetensors_tensors(
         const WorkspaceFile &file,
         std::vector<SafetensorsTensor> &tensors,
         std::string &error,
-        const std::string &model_family) {
+        const std::string &model_family,
+        const std::string &gguf_arch) {
     if (file.size < 8) {
         error = file.name + " is too small for a safetensors header.";
         return false;
@@ -1460,7 +1942,7 @@ bool read_safetensors_tensors(
     }
 
     std::vector<SafetensorsTensor> parsed =
-            parse_safetensors_tensors(header, file, header_length, model_family);
+            parse_safetensors_tensors(header, file, header_length, model_family, gguf_arch);
     tensors.insert(tensors.end(), parsed.begin(), parsed.end());
     return true;
 }
@@ -1493,12 +1975,15 @@ std::vector<WorkspaceFile> list_workspace_files(const std::string &model_directo
 }
 
 bool is_supported_model_family(const std::string &model_family) {
-    return model_family == "LLAMA" || model_family == "QWEN";
+    return model_family == "LLAMA" || model_family == "QWEN" || model_family == "GEMMA";
 }
 
 std::string model_family_label(const std::string &model_family) {
     if (model_family == "QWEN") {
         return "Qwen";
+    }
+    if (model_family == "GEMMA") {
+        return "Gemma";
     }
     return "LLaMA/Mistral";
 }
@@ -1511,7 +1996,7 @@ HorizonConversionSummary inspect_hf_safetensors_model(
         const std::string &quantization,
         const std::string &model_family) {
     if (!is_supported_model_family(model_family)) {
-        return {false, "Native GGUF writing currently supports only the LLaMA / Mistral and Qwen model families."};
+        return {false, "Native GGUF writing currently supports only the LLaMA / Mistral, Qwen, and Gemma model families."};
     }
 
     const std::vector<WorkspaceFile> files = list_workspace_files(model_directory);
@@ -1528,15 +2013,27 @@ HorizonConversionSummary inspect_hf_safetensors_model(
     for (const WorkspaceFile &file : files) {
         if (ends_with(file.name, ".safetensors")) {
             safetensors_files.push_back(file);
-        } else if (equals_ignore_case(file.name, "config.json")) {
-            config_path = file.path;
-        } else if (equals_ignore_case(file.name, "tokenizer.json")) {
-            tokenizer_json_path = file.path;
-            has_tokenizer = true;
-        } else if (equals_ignore_case(file.name, "tokenizer.model")) {
-            has_tokenizer = true;
         } else if (ends_with(file.name, ".safetensors.index.json")) {
             index_path = file.path;
+        } else if (ends_with(file.name, ".json") &&
+                   (equals_ignore_case(file.name, "tokenizer.json") ||
+                    contains_ignore_case(file.name, "tokenizer"))) {
+            if (tokenizer_json_path.empty() || equals_ignore_case(file.name, "tokenizer.json")) {
+                tokenizer_json_path = file.path;
+            }
+            has_tokenizer = true;
+        } else if (ends_with(file.name, ".model") &&
+                   (equals_ignore_case(file.name, "tokenizer.model") ||
+                    contains_ignore_case(file.name, "tokenizer"))) {
+            has_tokenizer = true;
+        } else if (ends_with(file.name, ".json") &&
+                   (equals_ignore_case(file.name, "config.json") ||
+                    contains_ignore_case(file.name, "config") ||
+                    (!contains_ignore_case(file.name, "tokenizer") &&
+                     contains_ignore_case(file.name, "model")))) {
+            if (config_path.empty() || equals_ignore_case(file.name, "config.json")) {
+                config_path = file.path;
+            }
         }
     }
 
@@ -1553,12 +2050,20 @@ HorizonConversionSummary inspect_hf_safetensors_model(
         return {false, "Sharded safetensors conversion requires the .safetensors.index.json file."};
     }
 
+    const std::string config_json = read_text_file(config_path, 1024 * 1024);
+    const std::string architecture = extract_first_architecture(config_json);
+    const std::string model_type = extract_json_string(config_json, "model_type");
+    const std::string gguf_arch = gguf_architecture_name(architecture, model_type, model_family);
+    if (gguf_arch == "gemma3n") {
+        return {false, "Gemma 3n is not supported by this native converter yet; it has extra per-layer tensors that are not mapped."};
+    }
+
     uint64_t source_bytes = 0;
     int tensor_headers = 0;
     int mapped_tensor_headers = 0;
     for (const WorkspaceFile &file : safetensors_files) {
         source_bytes += file.size;
-        SafetensorsHeader header = read_safetensors_header(file, model_family);
+        SafetensorsHeader header = read_safetensors_header(file, model_family, gguf_arch);
         if (!header.ok) {
             return {false, file.name + " is not a readable safetensors file: " + header.error + "."};
         }
@@ -1566,23 +2071,28 @@ HorizonConversionSummary inspect_hf_safetensors_model(
         mapped_tensor_headers += header.mapped_tensor_count;
     }
 
-    const std::string config_json = read_text_file(config_path, 1024 * 1024);
     const std::string tokenizer_json = tokenizer_json_path.empty()
             ? std::string()
             : read_text_file(tokenizer_json_path, 128 * 1024 * 1024);
+    std::vector<float> token_scores;
     std::vector<std::string> tokens = tokenizer_json_path.empty()
             ? std::vector<std::string>()
-            : extract_tokenizer_json_vocab(tokenizer_json);
+            : extract_tokenizer_json_vocab(tokenizer_json, token_scores);
     if (tokens.empty()) {
         return {false, "Native GGUF writing currently requires a tokenizer.json with a readable vocab object."};
     }
     if (model_family == "QWEN") {
         normalize_qwen_tokens(tokens, extract_json_uint32(config_json, "vocab_size", 0));
+        token_scores.resize(tokens.size(), 0.0f);
+    } else if (model_family == "GEMMA") {
+        normalize_gemma_tokens(tokens, token_scores, extract_json_uint32(config_json, "vocab_size", 0));
     }
 
     const std::string tokenizer_json_model_type = extract_tokenizer_json_model_type(tokenizer_json);
     const bool tokenizer_is_bpe = tokenizer_json_model_type == "BPE";
-    const std::string gguf_tokenizer_model = tokenizer_is_bpe ? "gpt2" : "llama";
+    const std::string gguf_tokenizer_model = tokenizer_is_bpe
+            ? (model_family == "GEMMA" ? "gemma4" : "gpt2")
+            : "llama";
     const std::vector<std::string> merges = tokenizer_is_bpe
             ? extract_tokenizer_json_merges(tokenizer_json)
             : std::vector<std::string>();
@@ -1597,11 +2107,9 @@ HorizonConversionSummary inspect_hf_safetensors_model(
         return {false, blocked.str()};
     }
     if (!is_supported_family_quantization(model_family, quantization)) {
-        return {false, quantization + " is currently enabled only for the Qwen model family."};
+        return {false, quantization + " is not currently enabled for the " + model_family_label(model_family) + " model family."};
     }
 
-    const std::string architecture = extract_first_architecture(config_json);
-    const std::string model_type = extract_json_string(config_json, "model_type");
     const uint32_t attention_head_count = extract_json_uint32(config_json, "num_attention_heads", 0);
     const uint32_t key_value_head_count =
             extract_json_uint32(config_json, "num_key_value_heads", attention_head_count);
@@ -1610,6 +2118,7 @@ HorizonConversionSummary inspect_hf_safetensors_model(
             config_json,
             tokenizer_json,
             tokens,
+            token_scores,
             gguf_tokenizer_model,
             merges,
             token_types,
@@ -1628,7 +2137,7 @@ HorizonConversionSummary inspect_hf_safetensors_model(
     std::vector<SafetensorsTensor> parsed_tensors;
     for (const WorkspaceFile &file : safetensors_files) {
         std::string parse_error;
-        if (!read_safetensors_tensors(file, parsed_tensors, parse_error, model_family)) {
+        if (!read_safetensors_tensors(file, parsed_tensors, parse_error, model_family, gguf_arch)) {
             return {false, parse_error};
         }
     }
@@ -1664,13 +2173,27 @@ HorizonConversionSummary inspect_hf_safetensors_model(
             return {false, tensor.source_name + " shape and safetensors byte range do not agree."};
         }
 
+        std::vector<uint64_t> output_shape = tensor.shape;
+        uint64_t output_element_count = element_count;
+        uint64_t output_source_bytes = source_bytes;
+        if (model_family == "GEMMA" &&
+                tensor.gguf_name == "token_embd.weight" &&
+                output_shape.size() == 2 &&
+                !tokens.empty() &&
+                output_shape[0] > tokens.size()) {
+            output_shape[0] = static_cast<uint64_t>(tokens.size());
+            output_element_count = tensor_element_count(output_shape);
+            output_source_bytes = output_element_count * safetensors_dtype_bytes(tensor.dtype);
+        }
+        const SafetensorsTensor output_tensor = tensor_with_shape(tensor, output_shape);
+
         const uint64_t output_data_size =
-                output_data_size_for_tensor(quantization, tensor, element_count, model_family);
+                output_data_size_for_tensor(quantization, output_tensor, output_element_count, model_family);
 
         const uint32_t output_ggml_type =
-                output_ggml_type_for_tensor(quantization, tensor, element_count, model_family);
+                output_ggml_type_for_tensor(quantization, output_tensor, output_element_count, model_family);
         const HorizonTensorOutputEncoding output_encoding =
-                output_encoding_for_tensor(quantization, tensor, element_count, model_family);
+                output_encoding_for_tensor(quantization, output_tensor, output_element_count, model_family);
         if (output_encoding == HorizonTensorOutputEncoding::Q6_K) {
             q6_k_tensor_count += 1;
         } else if (output_encoding == HorizonTensorOutputEncoding::Q5_K) {
@@ -1693,15 +2216,16 @@ HorizonConversionSummary inspect_hf_safetensors_model(
 
         gguf_tensors.push_back({
                 tensor.gguf_name,
-                tensor.shape,
+                output_shape,
                 output_ggml_type,
                 tensor.source_path,
                 tensor.source_offset,
-                source_bytes,
+                output_source_bytes,
                 output_data_size,
                 tensor_encoding_for_dtype(tensor.dtype),
                 output_encoding,
-                row_permutation_heads_for_tensor(tensor, attention_head_count, key_value_head_count, model_family),
+                row_permutation_heads_for_tensor(output_tensor, attention_head_count, key_value_head_count, model_family),
+                source_float_add_for_tensor(tensor, model_family),
         });
     }
 

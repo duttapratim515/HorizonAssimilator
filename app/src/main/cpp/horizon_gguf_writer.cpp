@@ -134,6 +134,12 @@ void append_little_u16(std::vector<char> &buffer, uint16_t value) {
     buffer.push_back(static_cast<char>((value >> 8) & 0xFFU));
 }
 
+float read_tensor_float(
+        const HorizonGgufTensorSource &tensor,
+        const char *bytes);
+
+uint32_t float32_to_bits(float value);
+
 bool convert_range_to_f16(
         const HorizonGgufTensorSource &tensor,
         std::ofstream &output,
@@ -175,13 +181,8 @@ bool convert_range_to_f16(
 
         output_buffer.clear();
         for (uint64_t offset = 0; offset < chunk; offset += source_stride) {
-            uint16_t half = 0;
-            if (tensor.source_encoding == HorizonTensorEncoding::F32) {
-                half = float32_bits_to_float16(read_little_u32(input_buffer.data() + offset));
-            } else {
-                const uint16_t bf16 = read_little_u16(input_buffer.data() + offset);
-                half = float32_bits_to_float16(static_cast<uint32_t>(bf16) << 16);
-            }
+            const uint16_t half = float32_bits_to_float16(
+                    float32_to_bits(read_tensor_float(tensor, input_buffer.data() + offset)));
             append_little_u16(output_buffer, half);
         }
 
@@ -348,6 +349,12 @@ float read_source_float(
         return float32_from_bits(static_cast<uint32_t>(read_little_u16(bytes)) << 16);
     }
     return float16_bits_to_float32(read_little_u16(bytes));
+}
+
+float read_tensor_float(
+        const HorizonGgufTensorSource &tensor,
+        const char *bytes) {
+    return read_source_float(bytes, tensor.source_encoding) + tensor.source_float_add;
 }
 
 int nearest_int(float value) {
@@ -986,7 +993,7 @@ bool convert_range_to_f32(
         for (uint64_t offset = 0; offset < chunk; offset += source_stride) {
             append_little_u32(
                     output_buffer,
-                    float32_to_bits(read_source_float(input_buffer.data() + offset, tensor.source_encoding)));
+                    float32_to_bits(read_tensor_float(tensor, input_buffer.data() + offset)));
         }
 
         output.write(output_buffer.data(), static_cast<std::streamsize>(output_buffer.size()));
@@ -1033,7 +1040,7 @@ bool quantize_range_to_q8_0(
 
         float abs_max = 0.0f;
         for (size_t index = 0; index < 32; ++index) {
-            values[index] = read_source_float(source_block.data() + index * source_stride, tensor.source_encoding);
+            values[index] = read_tensor_float(tensor, source_block.data() + index * source_stride);
             const float absolute = values[index] < 0.0f ? -values[index] : values[index];
             if (absolute > abs_max) {
                 abs_max = absolute;
@@ -1103,7 +1110,7 @@ bool quantize_range_to_q5_0(
         float abs_max = 0.0f;
         float max_value = 0.0f;
         for (size_t index = 0; index < 32; ++index) {
-            values[index] = read_source_float(source_block.data() + index * source_stride, tensor.source_encoding);
+            values[index] = read_tensor_float(tensor, source_block.data() + index * source_stride);
             const float absolute = std::fabs(values[index]);
             if (absolute > abs_max) {
                 abs_max = absolute;
@@ -1177,7 +1184,7 @@ bool quantize_range_to_q4_0(
         float abs_max = 0.0f;
         float max_value = 0.0f;
         for (size_t index = 0; index < 32; ++index) {
-            values[index] = read_source_float(source_block.data() + index * source_stride, tensor.source_encoding);
+            values[index] = read_tensor_float(tensor, source_block.data() + index * source_stride);
             const float absolute = std::fabs(values[index]);
             if (absolute > abs_max) {
                 abs_max = absolute;
@@ -1243,7 +1250,7 @@ bool quantize_range_to_q6_k(
         }
 
         for (int index = 0; index < kQkK; ++index) {
-            values[index] = read_source_float(source_block.data() + index * source_stride, tensor.source_encoding);
+            values[index] = read_tensor_float(tensor, source_block.data() + index * source_stride);
         }
         quantize_q6_k_block(values.data(), encoded);
 
@@ -1290,7 +1297,7 @@ bool quantize_range_to_q3_k(
         }
 
         for (int index = 0; index < kQkK; ++index) {
-            values[index] = read_source_float(source_block.data() + index * source_stride, tensor.source_encoding);
+            values[index] = read_tensor_float(tensor, source_block.data() + index * source_stride);
         }
         quantize_q3_k_block(values.data(), encoded);
 
@@ -1337,7 +1344,7 @@ bool quantize_range_to_q5_k(
         }
 
         for (int index = 0; index < kQkK; ++index) {
-            values[index] = read_source_float(source_block.data() + index * source_stride, tensor.source_encoding);
+            values[index] = read_tensor_float(tensor, source_block.data() + index * source_stride);
         }
         quantize_q5_k_block(values.data(), encoded);
 
@@ -1384,7 +1391,7 @@ bool quantize_range_to_q4_k(
         }
 
         for (int index = 0; index < kQkK; ++index) {
-            values[index] = read_source_float(source_block.data() + index * source_stride, tensor.source_encoding);
+            values[index] = read_tensor_float(tensor, source_block.data() + index * source_stride);
         }
         quantize_q4_k_block(values.data(), encoded);
 
@@ -1433,7 +1440,7 @@ bool write_tensor_data(
     if (tensor.output_encoding == HorizonTensorOutputEncoding::Q4_K) {
         return quantize_range_to_q4_k(tensor, output, error);
     }
-    if (tensor.source_encoding == HorizonTensorEncoding::F16) {
+    if (tensor.source_encoding == HorizonTensorEncoding::F16 && tensor.source_float_add == 0.0f) {
         return copy_range(tensor, output, error);
     }
     return convert_range_to_f16(tensor, output, error);

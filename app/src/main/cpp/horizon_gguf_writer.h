@@ -34,6 +34,7 @@ struct HorizonGgufTensorSource {
     HorizonTensorEncoding source_encoding;
     HorizonTensorOutputEncoding output_encoding;
     uint32_t row_permutation_heads;
+    float source_float_add;
 };
 
 class HorizonGgufMetadataWriter {

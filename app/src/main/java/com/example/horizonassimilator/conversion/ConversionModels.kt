@@ -24,6 +24,22 @@ data class ModelFile(
     val sizeBytes: Long? = null
 )
 
+fun String.isConfigMetadataFileName(): Boolean {
+    return endsWith(".json", ignoreCase = true) &&
+        !endsWith(".safetensors.index.json", ignoreCase = true) &&
+        !contains("tokenizer", ignoreCase = true) &&
+        (equals("config.json", ignoreCase = true) ||
+            contains("config", ignoreCase = true) ||
+            contains("model", ignoreCase = true))
+}
+
+fun String.isTokenizerMetadataFileName(): Boolean {
+    return (endsWith(".json", ignoreCase = true) || endsWith(".model", ignoreCase = true)) &&
+        (equals("tokenizer.json", ignoreCase = true) ||
+            equals("tokenizer.model", ignoreCase = true) ||
+            contains("tokenizer", ignoreCase = true))
+}
+
 sealed interface ConversionState {
     data object Idle : ConversionState
     data class Ready(
@@ -76,13 +92,15 @@ enum class GgufQuantization(
         label = "F16",
         description = "Current native test mode. Highest fidelity, largest GGUF output.",
         estimatedOutputRatio = 1.0,
-        nativeWriterEnabled = true
+        nativeWriterEnabled = true,
+        supportedFamilies = setOf(ModelFamily.LLAMA, ModelFamily.QWEN, ModelFamily.GEMMA)
     ),
     Q8_0(
         label = "Q8_0",
         description = "Validation mode. Smaller than F16, with broad tensor support for this native writer.",
         estimatedOutputRatio = 0.55,
-        nativeWriterEnabled = true
+        nativeWriterEnabled = true,
+        supportedFamilies = setOf(ModelFamily.LLAMA, ModelFamily.QWEN, ModelFamily.GEMMA)
     ),
     Q6_K(
         label = "Q6_K",
@@ -151,8 +169,8 @@ enum class ModelFamily(
     ),
     GEMMA(
         label = "Gemma",
-        description = "Planned family. Tensor mapping is not enabled yet.",
-        nativeWriterEnabled = false
+        description = "Gemma-family safetensors. Tensor mapping is experimental.",
+        nativeWriterEnabled = true
     ),
     PHI(
         label = "Phi",

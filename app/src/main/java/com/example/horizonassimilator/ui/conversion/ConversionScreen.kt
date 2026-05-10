@@ -46,7 +46,9 @@ import com.example.horizonassimilator.conversion.SafetensorsToGgufConverter
 import com.example.horizonassimilator.conversion.SelectedModel
 import com.example.horizonassimilator.conversion.UrlValidation
 import com.example.horizonassimilator.conversion.buildDeviceCapabilityPreflight
+import com.example.horizonassimilator.conversion.isConfigMetadataFileName
 import com.example.horizonassimilator.conversion.isSupportedFor
+import com.example.horizonassimilator.conversion.isTokenizerMetadataFileName
 import com.example.horizonassimilator.conversion.toSizeLabel
 import kotlinx.coroutines.launch
 
@@ -377,8 +379,8 @@ private fun ModelBundleSummary(
     val safetensorsCount = model.safetensorsFiles.size
     val safetensorsBytes = model.safetensorsFiles.mapNotNull { it.sizeBytes }.sum()
     val hasUnknownSafetensorsSize = model.safetensorsFiles.any { it.sizeBytes == null }
-    val hasConfig = fileNames.any { it.equals("config.json", ignoreCase = true) }
-    val hasTokenizer = fileNames.any { it.equals("tokenizer.json", ignoreCase = true) || it.equals("tokenizer.model", ignoreCase = true) }
+    val hasConfig = fileNames.any { it.isConfigMetadataFileName() }
+    val hasTokenizer = fileNames.any { it.isTokenizerMetadataFileName() }
     val hasIndex = fileNames.any { it.endsWith(".safetensors.index.json", ignoreCase = true) }
 
     Column(
@@ -392,7 +394,7 @@ private fun ModelBundleSummary(
             Text("safetensors size: ${safetensorsBytes.toSizeLabel()}")
         }
         SafetensorsSizeWarning(totalBytes = safetensorsBytes, hasUnknownSize = hasUnknownSafetensorsSize)
-        Text("config.json: ${if (hasConfig) "present" else "missing"}")
+        Text("config JSON: ${if (hasConfig) "present" else "missing"}")
         Text("tokenizer: ${if (hasTokenizer) "present" else "missing"}")
         if (safetensorsCount > 1) {
             Text("safetensors index: ${if (hasIndex) "present" else "missing"}")

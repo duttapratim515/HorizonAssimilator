@@ -66,8 +66,8 @@ fun Context.buildDeviceCapabilityPreflight(
 
     val fileNames = model.files.map { it.displayName }
     val safetensorsCount = model.safetensorsFiles.size
-    val hasConfig = fileNames.any { it.equals("config.json", ignoreCase = true) }
-    val hasTokenizer = fileNames.any { it.equals("tokenizer.json", ignoreCase = true) || it.equals("tokenizer.model", ignoreCase = true) }
+    val hasConfig = fileNames.any { it.isConfigMetadataFileName() }
+    val hasTokenizer = fileNames.any { it.isTokenizerMetadataFileName() }
     val hasIndex = fileNames.any { it.endsWith(".safetensors.index.json", ignoreCase = true) }
 
     val checks = listOf(
@@ -155,7 +155,7 @@ private fun bundleDetail(
 ): String {
     val missing = buildList {
         if (safetensorsCount == 0) add(".safetensors")
-        if (!hasConfig) add("config.json")
+        if (!hasConfig) add("config JSON")
         if (!hasTokenizer) add("tokenizer")
         if (safetensorsCount > 1 && !hasIndex) add("safetensors index")
     }

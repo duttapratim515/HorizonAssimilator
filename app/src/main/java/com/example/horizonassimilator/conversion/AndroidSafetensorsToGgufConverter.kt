@@ -30,11 +30,11 @@ class AndroidSafetensorsToGgufConverter(
             }
 
             val fileNames = workspace.files.map { it.file.name }
-            require(fileNames.any { it.equals("config.json", ignoreCase = true) }) {
-                "Add config.json from the model repository."
+            require(fileNames.any { it.isConfigMetadataFileName() }) {
+                "Add a config JSON from the model repository."
             }
-            require(fileNames.any { it.equals("tokenizer.json", ignoreCase = true) || it.equals("tokenizer.model", ignoreCase = true) }) {
-                "Add tokenizer.json or tokenizer.model from the model repository."
+            require(fileNames.any { it.isTokenizerMetadataFileName() }) {
+                "Add tokenizer.json, tokenizer.model, or a tokenizer-named file from the model repository."
             }
             if (safetensorsFiles.size > 1) {
                 require(fileNames.any { it.endsWith(".safetensors.index.json", ignoreCase = true) }) {
