@@ -646,10 +646,21 @@ bool is_supported_native_output_quantization(const std::string &quantization) {
 bool is_supported_family_quantization(
         const std::string &model_family,
         const std::string &quantization) {
-    if ((quantization == "Q4_0" || quantization == "Q5_0") && model_family != "QWEN") {
+    if (quantization == "Q5_0" && model_family != "QWEN") {
         return false;
     }
-    if (model_family == "GEMMA" && quantization != "F16" && quantization != "Q8_0") {
+    if (quantization == "Q4_0" && model_family != "QWEN" && model_family != "GEMMA") {
+        return false;
+    }
+    if (model_family == "GEMMA" &&
+            quantization != "F16" &&
+            quantization != "Q8_0" &&
+            quantization != "Q6_K" &&
+            quantization != "Q5_K_M" &&
+            quantization != "Q4_0" &&
+            quantization != "Q4_K_M" &&
+            quantization != "Q4_K_S" &&
+            quantization != "Q3_K_M") {
         return false;
     }
     return true;
@@ -657,12 +668,16 @@ bool is_supported_family_quantization(
 
 bool should_quantize_tensor_q8_0(
         const SafetensorsTensor &tensor,
-        uint64_t element_count) {
+        uint64_t element_count,
+        const std::string &model_family) {
+    const bool is_llama_permuted_attention =
+            model_family == "LLAMA" &&
+            (tensor.gguf_name.find(".attn_q.weight") != std::string::npos ||
+             tensor.gguf_name.find(".attn_k.weight") != std::string::npos);
     return tensor.shape.size() >= 2 &&
            !tensor.shape.empty() &&
            tensor.gguf_name != "output.weight" &&
-           tensor.gguf_name.find(".attn_q.weight") == std::string::npos &&
-           tensor.gguf_name.find(".attn_k.weight") == std::string::npos &&
+           !is_llama_permuted_attention &&
            tensor.shape.back() % 32 == 0 &&
            element_count % 32 == 0;
 }
@@ -792,7 +807,7 @@ uint32_t output_ggml_type_for_tensor(
     if (should_keep_tensor_f32(tensor)) {
         return 0;
     }
-    if (quantization == "Q8_0" && should_quantize_tensor_q8_0(tensor, element_count)) {
+    if (quantization == "Q8_0" && should_quantize_tensor_q8_0(tensor, element_count, model_family)) {
         return 8;
     }
     if (quantization == "Q5_0" && should_quantize_tensor_q5_0(tensor, element_count, model_family)) {
@@ -804,14 +819,14 @@ uint32_t output_ggml_type_for_tensor(
     if (quantization == "Q6_K" && should_quantize_tensor_q6_k(tensor, element_count, model_family)) {
         return 14;
     }
-    if (quantization == "Q6_K" && should_quantize_tensor_q8_0(tensor, element_count)) {
+    if (quantization == "Q6_K" && should_quantize_tensor_q8_0(tensor, element_count, model_family)) {
         return 8;
     }
     if ((quantization == "Q5_K_M" || quantization == "Q5_K_S") &&
             should_quantize_tensor_q5_k(tensor, element_count, model_family)) {
         return 13;
     }
-    if (quantization == "Q5_K_M" && should_quantize_tensor_q8_0(tensor, element_count)) {
+    if (quantization == "Q5_K_M" && should_quantize_tensor_q8_0(tensor, element_count, model_family)) {
         return 8;
     }
     if ((quantization == "Q4_K_M" || quantization == "Q4_K_S") &&
@@ -825,7 +840,7 @@ uint32_t output_ggml_type_for_tensor(
     if (quantization == "Q3_K_M" && should_quantize_tensor_q3_k(tensor, element_count, model_family)) {
         return 11;
     }
-    if (quantization == "Q3_K_M" && model_family == "QWEN" &&
+    if (quantization == "Q3_K_M" && (model_family == "QWEN" || model_family == "GEMMA") &&
             should_quantize_tensor_q4_0(tensor, element_count, model_family)) {
         return 2;
     }
@@ -840,7 +855,7 @@ HorizonTensorOutputEncoding output_encoding_for_tensor(
     if (should_keep_tensor_f32(tensor)) {
         return HorizonTensorOutputEncoding::F32;
     }
-    if (quantization == "Q8_0" && should_quantize_tensor_q8_0(tensor, element_count)) {
+    if (quantization == "Q8_0" && should_quantize_tensor_q8_0(tensor, element_count, model_family)) {
         return HorizonTensorOutputEncoding::Q8_0;
     }
     if (quantization == "Q5_0" && should_quantize_tensor_q5_0(tensor, element_count, model_family)) {
@@ -852,14 +867,14 @@ HorizonTensorOutputEncoding output_encoding_for_tensor(
     if (quantization == "Q6_K" && should_quantize_tensor_q6_k(tensor, element_count, model_family)) {
         return HorizonTensorOutputEncoding::Q6_K;
     }
-    if (quantization == "Q6_K" && should_quantize_tensor_q8_0(tensor, element_count)) {
+    if (quantization == "Q6_K" && should_quantize_tensor_q8_0(tensor, element_count, model_family)) {
         return HorizonTensorOutputEncoding::Q8_0;
     }
     if ((quantization == "Q5_K_M" || quantization == "Q5_K_S") &&
             should_quantize_tensor_q5_k(tensor, element_count, model_family)) {
         return HorizonTensorOutputEncoding::Q5_K;
     }
-    if (quantization == "Q5_K_M" && should_quantize_tensor_q8_0(tensor, element_count)) {
+    if (quantization == "Q5_K_M" && should_quantize_tensor_q8_0(tensor, element_count, model_family)) {
         return HorizonTensorOutputEncoding::Q8_0;
     }
     if ((quantization == "Q4_K_M" || quantization == "Q4_K_S") &&
@@ -873,7 +888,7 @@ HorizonTensorOutputEncoding output_encoding_for_tensor(
     if (quantization == "Q3_K_M" && should_quantize_tensor_q3_k(tensor, element_count, model_family)) {
         return HorizonTensorOutputEncoding::Q3_K;
     }
-    if (quantization == "Q3_K_M" && model_family == "QWEN" &&
+    if (quantization == "Q3_K_M" && (model_family == "QWEN" || model_family == "GEMMA") &&
             should_quantize_tensor_q4_0(tensor, element_count, model_family)) {
         return HorizonTensorOutputEncoding::Q4_0;
     }
@@ -888,7 +903,7 @@ uint64_t output_data_size_for_tensor(
     if (should_keep_tensor_f32(tensor)) {
         return element_count * 4;
     }
-    if (quantization == "Q8_0" && should_quantize_tensor_q8_0(tensor, element_count)) {
+    if (quantization == "Q8_0" && should_quantize_tensor_q8_0(tensor, element_count, model_family)) {
         return (element_count / 32) * 34;
     }
     if (quantization == "Q5_0" && should_quantize_tensor_q5_0(tensor, element_count, model_family)) {
@@ -900,14 +915,14 @@ uint64_t output_data_size_for_tensor(
     if (quantization == "Q6_K" && should_quantize_tensor_q6_k(tensor, element_count, model_family)) {
         return (element_count / 256) * 210;
     }
-    if (quantization == "Q6_K" && should_quantize_tensor_q8_0(tensor, element_count)) {
+    if (quantization == "Q6_K" && should_quantize_tensor_q8_0(tensor, element_count, model_family)) {
         return (element_count / 32) * 34;
     }
     if ((quantization == "Q5_K_M" || quantization == "Q5_K_S") &&
             should_quantize_tensor_q5_k(tensor, element_count, model_family)) {
         return (element_count / 256) * 176;
     }
-    if (quantization == "Q5_K_M" && should_quantize_tensor_q8_0(tensor, element_count)) {
+    if (quantization == "Q5_K_M" && should_quantize_tensor_q8_0(tensor, element_count, model_family)) {
         return (element_count / 32) * 34;
     }
     if ((quantization == "Q4_K_M" || quantization == "Q4_K_S") &&
@@ -921,7 +936,7 @@ uint64_t output_data_size_for_tensor(
     if (quantization == "Q3_K_M" && should_quantize_tensor_q3_k(tensor, element_count, model_family)) {
         return (element_count / 256) * 110;
     }
-    if (quantization == "Q3_K_M" && model_family == "QWEN" &&
+    if (quantization == "Q3_K_M" && (model_family == "QWEN" || model_family == "GEMMA") &&
             should_quantize_tensor_q4_0(tensor, element_count, model_family)) {
         return (element_count / 32) * 18;
     }
