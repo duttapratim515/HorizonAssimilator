@@ -2,6 +2,7 @@ package com.example.horizonassimilator.conversion
 
 import android.os.Build
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -35,11 +36,17 @@ class NativeGgufEngine : GgufEngine {
             onProgress(ConversionProgress(0.25f, "Starting native GGUF engine"))
 
             val resultCode = withContext(Dispatchers.Default) {
+                val nativeProgress = NativeProgressCallback { progress, message ->
+                    runBlocking {
+                        onProgress(ConversionProgress(progress, message))
+                    }
+                }
                 nativeConvertToGguf(
                     modelDirectoryPath = request.modelDirectory.absolutePath,
                     outputFilePath = request.outputFile.absolutePath,
                     quantization = request.quantization.label,
-                    modelFamily = request.modelFamily.name
+                    modelFamily = request.modelFamily.name,
+                    progressCallback = nativeProgress
                 )
             }
 
@@ -55,10 +62,15 @@ class NativeGgufEngine : GgufEngine {
         modelDirectoryPath: String,
         outputFilePath: String,
         quantization: String,
-        modelFamily: String
+        modelFamily: String,
+        progressCallback: NativeProgressCallback
     ): Int
 
     private external fun nativeLastError(): String
+
+    private fun interface NativeProgressCallback {
+        fun onProgress(progress: Float, message: String)
+    }
 
     companion object {
         init {

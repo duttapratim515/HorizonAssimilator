@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -51,7 +52,8 @@ public:
     bool write_file(
             const std::string &output_path,
             const std::vector<HorizonGgufTensorSource> &tensors,
-            std::string &error) const;
+            std::string &error,
+            const std::function<void(size_t, size_t, const std::string &)> &on_tensor_progress = nullptr) const;
     size_t kv_count() const;
 
 private:

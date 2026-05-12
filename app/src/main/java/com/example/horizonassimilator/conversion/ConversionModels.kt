@@ -93,28 +93,28 @@ enum class GgufQuantization(
         description = "Current native test mode. Highest fidelity, largest GGUF output.",
         estimatedOutputRatio = 1.0,
         nativeWriterEnabled = true,
-        supportedFamilies = setOf(ModelFamily.LLAMA, ModelFamily.QWEN, ModelFamily.GEMMA)
+        supportedFamilies = setOf(ModelFamily.LLAMA, ModelFamily.QWEN, ModelFamily.GEMMA, ModelFamily.PHI)
     ),
     Q8_0(
         label = "Q8_0",
         description = "Validation mode. Smaller than F16, with broad tensor support for this native writer.",
         estimatedOutputRatio = 0.55,
         nativeWriterEnabled = true,
-        supportedFamilies = setOf(ModelFamily.LLAMA, ModelFamily.QWEN, ModelFamily.GEMMA)
+        supportedFamilies = setOf(ModelFamily.LLAMA, ModelFamily.QWEN, ModelFamily.GEMMA, ModelFamily.PHI)
     ),
     Q6_K(
         label = "Q6_K",
         description = "Validation mode. Smaller than Q8_0, with K-quant packing enabled.",
         estimatedOutputRatio = 0.42,
         nativeWriterEnabled = true,
-        supportedFamilies = setOf(ModelFamily.LLAMA, ModelFamily.QWEN, ModelFamily.GEMMA)
+        supportedFamilies = setOf(ModelFamily.LLAMA, ModelFamily.QWEN, ModelFamily.GEMMA, ModelFamily.PHI)
     ),
     Q5_K_M(
         label = "Q5_K_M",
         description = "Validation mode. Medium 5-bit K-quant output for smaller mobile GGUF files.",
         estimatedOutputRatio = 0.35,
         nativeWriterEnabled = true,
-        supportedFamilies = setOf(ModelFamily.LLAMA, ModelFamily.QWEN, ModelFamily.GEMMA)
+        supportedFamilies = setOf(ModelFamily.LLAMA, ModelFamily.QWEN, ModelFamily.GEMMA, ModelFamily.PHI)
     ),
     Q5_0(
         label = "Q5_0",
@@ -128,14 +128,14 @@ enum class GgufQuantization(
         description = "Compatibility 4-bit quantization with 32-wide blocks for Qwen-sized rows.",
         estimatedOutputRatio = 0.32,
         nativeWriterEnabled = true,
-        supportedFamilies = setOf(ModelFamily.QWEN, ModelFamily.GEMMA)
+        supportedFamilies = setOf(ModelFamily.QWEN, ModelFamily.GEMMA, ModelFamily.PHI)
     ),
     Q4_K_M(
         label = "Q4_K_M",
         description = "Validation mode. Compact 4-bit K-quant output for mobile GGUF files.",
         estimatedOutputRatio = 0.29,
         nativeWriterEnabled = true,
-        supportedFamilies = setOf(ModelFamily.LLAMA, ModelFamily.QWEN, ModelFamily.GEMMA)
+        supportedFamilies = setOf(ModelFamily.LLAMA, ModelFamily.QWEN, ModelFamily.GEMMA, ModelFamily.PHI)
     ),
     Q4_K_S(
         label = "Q4_K_S",
@@ -149,7 +149,7 @@ enum class GgufQuantization(
         description = "Validation mode. Smallest enabled K-quant output for aggressive mobile compression.",
         estimatedOutputRatio = 0.22,
         nativeWriterEnabled = true,
-        supportedFamilies = setOf(ModelFamily.LLAMA, ModelFamily.QWEN, ModelFamily.GEMMA)
+        supportedFamilies = setOf(ModelFamily.LLAMA, ModelFamily.QWEN, ModelFamily.GEMMA, ModelFamily.PHI)
     )
 }
 
@@ -179,7 +179,7 @@ enum class ModelFamily(
     ),
     PHI(
         label = "Phi",
-        description = "Planned family. Tensor mapping is not enabled yet.",
-        nativeWriterEnabled = false
+        description = "Phi-family safetensors. F16 conversion is enabled first for validation.",
+        nativeWriterEnabled = true
     )
 }

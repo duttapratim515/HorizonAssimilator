@@ -1550,7 +1550,8 @@ std::vector<uint8_t> HorizonGgufMetadataWriter::build(uint64_t tensor_count) con
 bool HorizonGgufMetadataWriter::write_file(
         const std::string &output_path,
         const std::vector<HorizonGgufTensorSource> &tensors,
-        std::string &error) const {
+        std::string &error,
+        const std::function<void(size_t, size_t, const std::string &)> &on_tensor_progress) const {
     std::vector<uint64_t> offsets;
     offsets.reserve(tensors.size());
     uint64_t cursor = 0;
@@ -1590,7 +1591,11 @@ bool HorizonGgufMetadataWriter::write_file(
     }
 
     uint64_t written_tensor_bytes = 0;
-    for (const HorizonGgufTensorSource &tensor : tensors) {
+    for (size_t tensor_index = 0; tensor_index < tensors.size(); ++tensor_index) {
+        const HorizonGgufTensorSource &tensor = tensors[tensor_index];
+        if (on_tensor_progress) {
+            on_tensor_progress(tensor_index, tensors.size(), tensor.name);
+        }
         const uint64_t aligned = align_to(written_tensor_bytes, kDefaultAlignment);
         if (!write_zero_padding(output, aligned - written_tensor_bytes)) {
             error = "Unable to write tensor alignment padding.";

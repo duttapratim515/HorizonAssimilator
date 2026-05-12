@@ -582,6 +582,314 @@ std::string map_gemma_tensor_name(
     return "";
 }
 
+std::string map_phi_tensor_name(
+        const std::string &source_name,
+        const std::string &gguf_arch) {
+    const std::string model_layers_prefix = "model.layers.";
+    if (source_name == "model.embed_tokens.weight") {
+        return "token_embd.weight";
+    }
+    if (source_name == "model.final_layernorm.weight") {
+        return "output_norm.weight";
+    }
+    if (source_name == "model.final_layernorm.bias") {
+        return "output_norm.bias";
+    }
+    if (source_name == "model.norm.weight") {
+        return "output_norm.weight";
+    }
+    if (source_name == "model.norm.bias") {
+        return "output_norm.bias";
+    }
+    if (source_name == "lm_head.weight") {
+        return "output.weight";
+    }
+    if (source_name == "lm_head.bias") {
+        return "output.bias";
+    }
+    if (source_name.rfind(model_layers_prefix, 0) == 0) {
+        const size_t layer_start = model_layers_prefix.size();
+        const size_t layer_end = source_name.find('.', layer_start);
+        if (layer_end == std::string::npos) {
+            return "";
+        }
+        const std::string layer = source_name.substr(layer_start, layer_end - layer_start);
+        const std::string rest = source_name.substr(layer_end + 1);
+
+        if (rest == "input_layernorm.weight") {
+            return "blk." + layer + ".attn_norm.weight";
+        }
+        if (rest == "input_layernorm.bias") {
+            return "blk." + layer + ".attn_norm.bias";
+        }
+        if (rest == "post_attention_layernorm.weight") {
+            return "blk." + layer + ".ffn_norm.weight";
+        }
+        if (rest == "post_attention_layernorm.bias") {
+            return "blk." + layer + ".ffn_norm.bias";
+        }
+        if (rest == "self_attn.qkv_proj.weight") {
+            return "blk." + layer + ".attn_qkv.weight";
+        }
+        if (rest == "self_attn.qkv_proj.bias") {
+            return "blk." + layer + ".attn_qkv.bias";
+        }
+        if (rest == "self_attn.q_proj.weight") {
+            return "blk." + layer + ".attn_q.weight";
+        }
+        if (rest == "self_attn.q_proj.bias") {
+            return "blk." + layer + ".attn_q.bias";
+        }
+        if (rest == "self_attn.k_proj.weight") {
+            return "blk." + layer + ".attn_k.weight";
+        }
+        if (rest == "self_attn.k_proj.bias") {
+            return "blk." + layer + ".attn_k.bias";
+        }
+        if (rest == "self_attn.v_proj.weight") {
+            return "blk." + layer + ".attn_v.weight";
+        }
+        if (rest == "self_attn.v_proj.bias") {
+            return "blk." + layer + ".attn_v.bias";
+        }
+        if (rest == "self_attn.o_proj.weight") {
+            return "blk." + layer + ".attn_output.weight";
+        }
+        if (rest == "self_attn.o_proj.bias") {
+            return "blk." + layer + ".attn_output.bias";
+        }
+        if (rest == "self_attn.dense.weight") {
+            return "blk." + layer + ".attn_output.weight";
+        }
+        if (rest == "self_attn.dense.bias") {
+            return "blk." + layer + ".attn_output.bias";
+        }
+        if (rest == "mlp.gate_up_proj.weight") {
+            return "blk." + layer + ".ffn_up.weight";
+        }
+        if (rest == "mlp.fc1.weight") {
+            return "blk." + layer + ".ffn_up.weight";
+        }
+        if (rest == "mlp.fc1.bias") {
+            return "blk." + layer + ".ffn_up.bias";
+        }
+        if (rest == "mlp.down_proj.weight") {
+            return "blk." + layer + ".ffn_down.weight";
+        }
+        if (rest == "mlp.fc2.weight") {
+            return "blk." + layer + ".ffn_down.weight";
+        }
+        if (rest == "mlp.fc2.bias") {
+            return "blk." + layer + ".ffn_down.bias";
+        }
+        return "";
+    }
+
+    if (gguf_arch == "phi2") {
+        const std::string prefix = "transformer.h.";
+        if (source_name == "transformer.embd.wte.weight") {
+            return "token_embd.weight";
+        }
+        if (source_name == "embd.wte.weight") {
+            return "token_embd.weight";
+        }
+        if (source_name == "transformer.wte.weight") {
+            return "token_embd.weight";
+        }
+        if (source_name == "lm_head.ln.weight") {
+            return "output_norm.weight";
+        }
+        if (source_name == "lm_head.ln.bias") {
+            return "output_norm.bias";
+        }
+        if (source_name == "lm_head.linear.weight") {
+            return "output.weight";
+        }
+        if (source_name == "lm_head.linear.bias") {
+            return "output.bias";
+        }
+        if (source_name == "lm_head.weight") {
+            return "output.weight";
+        }
+        if (source_name == "lm_head.bias") {
+            return "output.bias";
+        }
+        if (source_name == "ln_f.weight" || source_name == "transformer.ln_f.weight") {
+            return "output_norm.weight";
+        }
+        if (source_name == "ln_f.bias" || source_name == "transformer.ln_f.bias") {
+            return "output_norm.bias";
+        }
+        if (source_name.rfind(prefix, 0) != 0) {
+            const std::string layers_prefix = "layers.";
+            if (source_name.rfind(layers_prefix, 0) != 0) {
+                return "";
+            }
+
+            const size_t layer_start = layers_prefix.size();
+            const size_t layer_end = source_name.find('.', layer_start);
+            if (layer_end == std::string::npos) {
+                return "";
+            }
+            const std::string layer = source_name.substr(layer_start, layer_end - layer_start);
+            const std::string rest = source_name.substr(layer_end + 1);
+
+            if (rest == "ln.weight") {
+                return "blk." + layer + ".attn_norm.weight";
+            }
+            if (rest == "ln.bias") {
+                return "blk." + layer + ".attn_norm.bias";
+            }
+            if (rest == "mixer.Wqkv.weight") {
+                return "blk." + layer + ".attn_qkv.weight";
+            }
+            if (rest == "mixer.Wqkv.bias") {
+                return "blk." + layer + ".attn_qkv.bias";
+            }
+            if (rest == "mixer.out_proj.weight") {
+                return "blk." + layer + ".attn_output.weight";
+            }
+            if (rest == "mixer.out_proj.bias") {
+                return "blk." + layer + ".attn_output.bias";
+            }
+            if (rest == "mlp.fc1.weight") {
+                return "blk." + layer + ".ffn_up.weight";
+            }
+            if (rest == "mlp.fc1.bias") {
+                return "blk." + layer + ".ffn_up.bias";
+            }
+            if (rest == "mlp.fc2.weight") {
+                return "blk." + layer + ".ffn_down.weight";
+            }
+            if (rest == "mlp.fc2.bias") {
+                return "blk." + layer + ".ffn_down.bias";
+            }
+            return "";
+        }
+
+        const size_t layer_start = prefix.size();
+        const size_t layer_end = source_name.find('.', layer_start);
+        if (layer_end == std::string::npos) {
+            return "";
+        }
+        const std::string layer = source_name.substr(layer_start, layer_end - layer_start);
+        const std::string rest = source_name.substr(layer_end + 1);
+
+        if (rest == "ln.weight") {
+            return "blk." + layer + ".attn_norm.weight";
+        }
+        if (rest == "ln.bias") {
+            return "blk." + layer + ".attn_norm.bias";
+        }
+        if (rest == "mixer.Wqkv.weight") {
+            return "blk." + layer + ".attn_qkv.weight";
+        }
+        if (rest == "mixer.Wqkv.bias") {
+            return "blk." + layer + ".attn_qkv.bias";
+        }
+        if (rest == "mixer.out_proj.weight") {
+            return "blk." + layer + ".attn_output.weight";
+        }
+        if (rest == "mixer.out_proj.bias") {
+            return "blk." + layer + ".attn_output.bias";
+        }
+        if (rest == "mlp.fc1.weight") {
+            return "blk." + layer + ".ffn_up.weight";
+        }
+        if (rest == "mlp.fc1.bias") {
+            return "blk." + layer + ".ffn_up.bias";
+        }
+        if (rest == "mlp.fc2.weight") {
+            return "blk." + layer + ".ffn_down.weight";
+        }
+        if (rest == "mlp.fc2.bias") {
+            return "blk." + layer + ".ffn_down.bias";
+        }
+    }
+
+    const std::string prefix = model_layers_prefix;
+    if (source_name.rfind(prefix, 0) != 0) {
+        return "";
+    }
+
+    const size_t layer_start = prefix.size();
+    const size_t layer_end = source_name.find('.', layer_start);
+    if (layer_end == std::string::npos) {
+        return "";
+    }
+    const std::string layer = source_name.substr(layer_start, layer_end - layer_start);
+    const std::string rest = source_name.substr(layer_end + 1);
+
+    if (rest == "input_layernorm.weight") {
+        return "blk." + layer + ".attn_norm.weight";
+    }
+    if (rest == "input_layernorm.bias") {
+        return "blk." + layer + ".attn_norm.bias";
+    }
+    if (rest == "post_attention_layernorm.weight") {
+        return "blk." + layer + ".ffn_norm.weight";
+    }
+    if (rest == "post_attention_layernorm.bias") {
+        return "blk." + layer + ".ffn_norm.bias";
+    }
+    if (rest == "self_attn.qkv_proj.weight") {
+        return "blk." + layer + ".attn_qkv.weight";
+    }
+    if (rest == "self_attn.qkv_proj.bias") {
+        return "blk." + layer + ".attn_qkv.bias";
+    }
+    if (rest == "self_attn.q_proj.weight") {
+        return "blk." + layer + ".attn_q.weight";
+    }
+    if (rest == "self_attn.q_proj.bias") {
+        return "blk." + layer + ".attn_q.bias";
+    }
+    if (rest == "self_attn.k_proj.weight") {
+        return "blk." + layer + ".attn_k.weight";
+    }
+    if (rest == "self_attn.k_proj.bias") {
+        return "blk." + layer + ".attn_k.bias";
+    }
+    if (rest == "self_attn.v_proj.weight") {
+        return "blk." + layer + ".attn_v.weight";
+    }
+    if (rest == "self_attn.v_proj.bias") {
+        return "blk." + layer + ".attn_v.bias";
+    }
+    if (rest == "self_attn.o_proj.weight") {
+        return "blk." + layer + ".attn_output.weight";
+    }
+    if (rest == "self_attn.o_proj.bias") {
+        return "blk." + layer + ".attn_output.bias";
+    }
+    if (rest == "self_attn.dense.weight") {
+        return "blk." + layer + ".attn_output.weight";
+    }
+    if (rest == "self_attn.dense.bias") {
+        return "blk." + layer + ".attn_output.bias";
+    }
+    if (rest == "mlp.gate_up_proj.weight") {
+        return "blk." + layer + ".ffn_up.weight";
+    }
+    if (rest == "mlp.fc1.weight") {
+        return "blk." + layer + ".ffn_up.weight";
+    }
+    if (rest == "mlp.fc1.bias") {
+        return "blk." + layer + ".ffn_up.bias";
+    }
+    if (rest == "mlp.down_proj.weight") {
+        return "blk." + layer + ".ffn_down.weight";
+    }
+    if (rest == "mlp.fc2.weight") {
+        return "blk." + layer + ".ffn_down.weight";
+    }
+    if (rest == "mlp.fc2.bias") {
+        return "blk." + layer + ".ffn_down.bias";
+    }
+
+    return "";
+}
+
 std::string map_tensor_name(
         const std::string &source_name,
         const std::string &model_family,
@@ -591,6 +899,9 @@ std::string map_tensor_name(
     }
     if (model_family == "GEMMA") {
         return map_gemma_tensor_name(source_name, gguf_arch);
+    }
+    if (model_family == "PHI") {
+        return map_phi_tensor_name(source_name, gguf_arch);
     }
     return map_llama_tensor_name(source_name);
 }
@@ -646,10 +957,21 @@ bool is_supported_native_output_quantization(const std::string &quantization) {
 bool is_supported_family_quantization(
         const std::string &model_family,
         const std::string &quantization) {
+    if (model_family == "PHI" &&
+            quantization != "F16" &&
+            quantization != "Q8_0" &&
+            quantization != "Q6_K" &&
+            quantization != "Q5_K_M" &&
+            quantization != "Q4_0" &&
+            quantization != "Q4_K_M" &&
+            quantization != "Q3_K_M") {
+        return false;
+    }
     if (quantization == "Q5_0" && model_family != "QWEN") {
         return false;
     }
-    if (quantization == "Q4_0" && model_family != "QWEN" && model_family != "GEMMA") {
+    if (quantization == "Q4_0" && model_family != "QWEN" && model_family != "GEMMA" &&
+            model_family != "PHI") {
         return false;
     }
     if (model_family == "GEMMA" &&
@@ -840,7 +1162,8 @@ uint32_t output_ggml_type_for_tensor(
     if (quantization == "Q3_K_M" && should_quantize_tensor_q3_k(tensor, element_count, model_family)) {
         return 11;
     }
-    if (quantization == "Q3_K_M" && (model_family == "QWEN" || model_family == "GEMMA") &&
+    if (quantization == "Q3_K_M" &&
+            (model_family == "QWEN" || model_family == "GEMMA" || model_family == "PHI") &&
             should_quantize_tensor_q4_0(tensor, element_count, model_family)) {
         return 2;
     }
@@ -888,7 +1211,8 @@ HorizonTensorOutputEncoding output_encoding_for_tensor(
     if (quantization == "Q3_K_M" && should_quantize_tensor_q3_k(tensor, element_count, model_family)) {
         return HorizonTensorOutputEncoding::Q3_K;
     }
-    if (quantization == "Q3_K_M" && (model_family == "QWEN" || model_family == "GEMMA") &&
+    if (quantization == "Q3_K_M" &&
+            (model_family == "QWEN" || model_family == "GEMMA" || model_family == "PHI") &&
             should_quantize_tensor_q4_0(tensor, element_count, model_family)) {
         return HorizonTensorOutputEncoding::Q4_0;
     }
@@ -936,7 +1260,8 @@ uint64_t output_data_size_for_tensor(
     if (quantization == "Q3_K_M" && should_quantize_tensor_q3_k(tensor, element_count, model_family)) {
         return (element_count / 256) * 110;
     }
-    if (quantization == "Q3_K_M" && (model_family == "QWEN" || model_family == "GEMMA") &&
+    if (quantization == "Q3_K_M" &&
+            (model_family == "QWEN" || model_family == "GEMMA" || model_family == "PHI") &&
             should_quantize_tensor_q4_0(tensor, element_count, model_family)) {
         return (element_count / 32) * 18;
     }
@@ -1340,6 +1665,37 @@ void normalize_gemma_tokens(
     }
 }
 
+void normalize_phi_tokens(
+        std::vector<std::string> &tokens,
+        std::vector<float> &scores,
+        uint32_t config_vocab_size) {
+    if (config_vocab_size > tokens.size()) {
+        tokens.resize(config_vocab_size);
+    }
+    if (scores.size() < tokens.size()) {
+        scores.resize(tokens.size(), 0.0f);
+    }
+
+    std::unordered_set<std::string> seen;
+    seen.reserve(tokens.size());
+    for (size_t index = 0; index < tokens.size(); ++index) {
+        std::string token = tokens[index];
+        if (!token.empty() && seen.insert(token).second) {
+            continue;
+        }
+
+        std::string replacement;
+        size_t candidate = index;
+        do {
+            replacement = "[PAD" + std::to_string(candidate) + "]";
+            ++candidate;
+        } while (seen.find(replacement) != seen.end());
+
+        tokens[index] = replacement;
+        seen.insert(replacement);
+    }
+}
+
 std::string extract_tokenizer_json_model_type(const std::string &tokenizer_json) {
     const std::string model_key = "\"model\"";
     size_t key_pos = tokenizer_json.find(model_key);
@@ -1520,6 +1876,18 @@ uint32_t token_id_for_content(
     return fallback;
 }
 
+uint32_t token_id_for_token(
+        const std::vector<std::string> &tokens,
+        const std::string &content,
+        uint32_t fallback) {
+    for (size_t index = 0; index < tokens.size(); ++index) {
+        if (tokens[index] == content) {
+            return static_cast<uint32_t>(index);
+        }
+    }
+    return fallback;
+}
+
 std::vector<int32_t> build_token_types(const std::string &tokenizer_json, size_t token_count) {
     constexpr int32_t kNormalToken = 1;
     constexpr int32_t kControlToken = 3;
@@ -1629,6 +1997,9 @@ std::string tokenizer_pre_for_model(
     if (model_family == "QWEN") {
         return "qwen2";
     }
+    if (model_family == "PHI" && vocab_size == 51200) {
+        return "phi-2";
+    }
     if (vocab_size == 49152) {
         return "smollm";
     }
@@ -1669,6 +2040,16 @@ std::string gguf_architecture_name(
             return "gemma2";
         }
         return "gemma";
+    }
+    if (model_family == "PHI") {
+        if (source.find("phimoe") != std::string::npos || source.find("phi_moe") != std::string::npos) {
+            return "phimoe";
+        }
+        if (source.find("phi3") != std::string::npos || source.find("phi-3") != std::string::npos ||
+                source.find("phi4") != std::string::npos || source.find("phi-4") != std::string::npos) {
+            return "phi3";
+        }
+        return "phi2";
     }
     if (source.find("mistral") != std::string::npos) {
         return "llama";
@@ -1736,27 +2117,68 @@ HorizonGgufMetadataWriter build_metadata_writer(
 
     const std::string prefix = gguf_arch.empty() ? "llama" : gguf_arch;
     const uint32_t vocab_size = static_cast<uint32_t>(tokens.size());
-    writer.add_uint32(prefix + ".context_length", extract_json_uint32(config_json, "max_position_embeddings", 0));
+    writer.add_uint32(
+            prefix + ".context_length",
+            extract_json_uint32(
+                    config_json,
+                    "max_position_embeddings",
+                    extract_json_uint32(config_json, "n_positions", 0)));
     writer.add_uint32(prefix + ".vocab_size", vocab_size);
-    writer.add_uint32(prefix + ".embedding_length", extract_json_uint32(config_json, "hidden_size", 0));
-    writer.add_uint32(prefix + ".block_count", extract_json_uint32(config_json, "num_hidden_layers", 0));
-    writer.add_uint32(prefix + ".feed_forward_length", extract_json_uint32(config_json, "intermediate_size", 0));
-    const uint32_t head_count = extract_json_uint32(config_json, "num_attention_heads", 0);
+    const uint32_t embedding_length = extract_json_uint32(
+            config_json,
+            "hidden_size",
+            extract_json_uint32(config_json, "n_embd", 0));
+    writer.add_uint32(prefix + ".embedding_length", embedding_length);
+    writer.add_uint32(
+            prefix + ".block_count",
+            extract_json_uint32(
+                    config_json,
+                    "num_hidden_layers",
+                    extract_json_uint32(config_json, "n_layer", 0)));
+    const uint32_t feed_forward_length = model_family == "PHI" && gguf_arch == "phi2"
+            ? 4 * embedding_length
+            : extract_json_uint32(config_json, "intermediate_size", 0);
+    writer.add_uint32(prefix + ".feed_forward_length", feed_forward_length);
+    const uint32_t head_count = extract_json_uint32(
+            config_json,
+            "num_attention_heads",
+            extract_json_uint32(config_json, "n_head", 0));
     writer.add_uint32(prefix + ".attention.head_count", head_count);
-    writer.add_uint32(prefix + ".attention.head_count_kv", extract_json_uint32(config_json, "num_key_value_heads", head_count));
-    const uint32_t head_dim = extract_json_uint32(
+    uint32_t head_count_kv = extract_json_uint32(
+            config_json,
+            "num_key_value_heads",
+            extract_json_uint32(config_json, "n_head_kv", head_count));
+    if (model_family == "PHI" && head_count_kv == 0) {
+        head_count_kv = head_count;
+    }
+    writer.add_uint32(prefix + ".attention.head_count_kv", head_count_kv);
+    uint32_t head_dim = extract_json_uint32(
             config_json,
             "head_dim",
-            extract_json_uint32(config_json, "hidden_size", 0) / (head_count == 0 ? 1 : head_count));
+            embedding_length / (head_count == 0 ? 1 : head_count));
+    if (model_family == "PHI") {
+        const float partial_rotary_factor = extract_json_float(config_json, "partial_rotary_factor", 1.0f);
+        head_dim = static_cast<uint32_t>(partial_rotary_factor * static_cast<float>(embedding_length)) /
+                (head_count == 0 ? 1 : head_count);
+    }
     writer.add_uint32(prefix + ".rope.dimension_count", head_dim);
     if (model_family == "GEMMA" && head_dim != 0) {
         writer.add_uint32(prefix + ".attention.key_length", head_dim);
         writer.add_uint32(prefix + ".attention.value_length", head_dim);
     }
     writer.add_float32(prefix + ".rope.freq_base", extract_json_float(config_json, "rope_theta", 10000.0f));
-    writer.add_float32(
-            prefix + ".attention.layer_norm_rms_epsilon",
-            extract_json_float(config_json, "rms_norm_eps", 0.00001f));
+    if (model_family == "PHI" && gguf_arch == "phi2") {
+        writer.add_float32(
+                prefix + ".attention.layer_norm_epsilon",
+                extract_json_float(
+                        config_json,
+                        "layer_norm_epsilon",
+                        extract_json_float(config_json, "layer_norm_eps", 0.00001f)));
+    } else {
+        writer.add_float32(
+                prefix + ".attention.layer_norm_rms_epsilon",
+                extract_json_float(config_json, "rms_norm_eps", 0.00001f));
+    }
     if (model_family == "GEMMA") {
         if (has_json_number(config_json, "attn_logit_softcapping")) {
             writer.add_float32(
@@ -1801,6 +2223,12 @@ HorizonGgufMetadataWriter build_metadata_writer(
         writer.add_uint32(
                 "tokenizer.ggml.eot_token_id",
                 token_id_for_content(tokenizer_json, "<|im_end|>", eos_token_id));
+    } else if (model_family == "PHI" && gguf_arch == "phi2") {
+        const uint32_t end_of_text_id = token_id_for_token(tokens, "<|endoftext|>", 50256);
+        writer.add_uint32("tokenizer.ggml.bos_token_id", end_of_text_id);
+        writer.add_uint32("tokenizer.ggml.eos_token_id", end_of_text_id);
+        writer.add_uint32("tokenizer.ggml.eot_token_id", end_of_text_id);
+        writer.add_uint32("tokenizer.ggml.unknown_token_id", end_of_text_id);
     } else {
         writer.add_uint32("tokenizer.ggml.bos_token_id", extract_json_uint32(config_json, "bos_token_id", 1));
         writer.add_uint32("tokenizer.ggml.eos_token_id", extract_json_uint32(config_json, "eos_token_id", 2));
@@ -1813,7 +2241,9 @@ HorizonGgufMetadataWriter build_metadata_writer(
                     extract_json_uint32(config_json, "pad_token_id", 0));
         }
     }
-    writer.add_bool("tokenizer.ggml.add_bos_token", should_add_bos_token(model_family, vocab_size));
+    writer.add_bool(
+            "tokenizer.ggml.add_bos_token",
+            model_family == "PHI" && gguf_arch == "phi2" ? false : should_add_bos_token(model_family, vocab_size));
     writer.add_bool("tokenizer.ggml.add_eos_token", false);
     if (model_family == "GEMMA") {
         writer.add_bool("tokenizer.ggml.add_sep_token", false);
@@ -1990,7 +2420,8 @@ std::vector<WorkspaceFile> list_workspace_files(const std::string &model_directo
 }
 
 bool is_supported_model_family(const std::string &model_family) {
-    return model_family == "LLAMA" || model_family == "QWEN" || model_family == "GEMMA";
+    return model_family == "LLAMA" || model_family == "QWEN" || model_family == "GEMMA" ||
+            model_family == "PHI";
 }
 
 std::string model_family_label(const std::string &model_family) {
@@ -1999,6 +2430,9 @@ std::string model_family_label(const std::string &model_family) {
     }
     if (model_family == "GEMMA") {
         return "Gemma";
+    }
+    if (model_family == "PHI") {
+        return "Phi";
     }
     return "LLaMA/Mistral";
 }
@@ -2009,9 +2443,10 @@ HorizonConversionSummary inspect_hf_safetensors_model(
         const std::string &model_directory,
         const std::string &output_file,
         const std::string &quantization,
-        const std::string &model_family) {
+        const std::string &model_family,
+        const std::function<void(float, const std::string &)> &on_progress) {
     if (!is_supported_model_family(model_family)) {
-        return {false, "Native GGUF writing currently supports only the LLaMA / Mistral, Qwen, and Gemma model families."};
+        return {false, "Native GGUF writing currently supports only the LLaMA / Mistral, Qwen, Gemma, and Phi model families."};
     }
 
     const std::vector<WorkspaceFile> files = list_workspace_files(model_directory);
@@ -2101,6 +2536,8 @@ HorizonConversionSummary inspect_hf_safetensors_model(
         token_scores.resize(tokens.size(), 0.0f);
     } else if (model_family == "GEMMA") {
         normalize_gemma_tokens(tokens, token_scores, extract_json_uint32(config_json, "vocab_size", 0));
+    } else if (model_family == "PHI") {
+        normalize_phi_tokens(tokens, token_scores, extract_json_uint32(config_json, "vocab_size", 0));
     }
 
     const std::string tokenizer_json_model_type = extract_tokenizer_json_model_type(tokenizer_json);
@@ -2125,9 +2562,15 @@ HorizonConversionSummary inspect_hf_safetensors_model(
         return {false, quantization + " is not currently enabled for the " + model_family_label(model_family) + " model family."};
     }
 
-    const uint32_t attention_head_count = extract_json_uint32(config_json, "num_attention_heads", 0);
-    const uint32_t key_value_head_count =
+    const uint32_t attention_head_count = extract_json_uint32(
+            config_json,
+            "num_attention_heads",
+            extract_json_uint32(config_json, "n_head", 0));
+    uint32_t key_value_head_count =
             extract_json_uint32(config_json, "num_key_value_heads", attention_head_count);
+    if (model_family == "PHI" && key_value_head_count == 0) {
+        key_value_head_count = attention_head_count;
+    }
     const std::vector<int32_t> token_types = build_token_types(tokenizer_json, tokens, model_family);
     HorizonGgufMetadataWriter metadata_writer = build_metadata_writer(
             config_json,
@@ -2245,12 +2688,42 @@ HorizonConversionSummary inspect_hf_safetensors_model(
     }
 
     if (gguf_tensors.empty()) {
-        return {false, "No mapped " + model_family_label(model_family) + " tensors are available for GGUF writing."};
+        std::ostringstream unmapped;
+        unmapped << "No mapped " << model_family_label(model_family)
+                 << " tensors are available for GGUF writing. Architecture "
+                 << (gguf_arch.empty() ? "unknown" : gguf_arch) << ".";
+        int examples = 0;
+        for (const SafetensorsTensor &tensor : parsed_tensors) {
+            if (!tensor.source_name.empty()) {
+                if (examples == 0) {
+                    unmapped << " First safetensors tensor names:";
+                }
+                unmapped << " " << tensor.source_name;
+                examples += 1;
+                if (examples >= 8) {
+                    break;
+                }
+            }
+        }
+        return {false, unmapped.str()};
     }
 
     if (is_supported_native_output_quantization(quantization)) {
         std::string write_error;
-        if (!metadata_writer.write_file(output_file, gguf_tensors, write_error)) {
+        if (on_progress) {
+            on_progress(0.32f, "Writing GGUF metadata");
+        }
+        const auto tensor_progress = [&on_progress](size_t index, size_t total, const std::string &name) {
+            if (!on_progress || total == 0) {
+                return;
+            }
+            const float tensor_fraction = static_cast<float>(index) / static_cast<float>(total);
+            const float progress = 0.35f + tensor_fraction * 0.60f;
+            std::ostringstream message;
+            message << "Writing tensor " << (index + 1) << "/" << total << ": " << name;
+            on_progress(progress, message.str());
+        };
+        if (!metadata_writer.write_file(output_file, gguf_tensors, write_error, tensor_progress)) {
             return {false, write_error};
         }
 
